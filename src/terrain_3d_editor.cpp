@@ -193,6 +193,14 @@ void Terrain3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 			return;
 		}
 	}
+	if (data->is_gpu_workflow_ready() && map_type == TYPE_HEIGHT && (_tool == SCULPT || _tool == HEIGHT) &&
+			(_operation == ADD || _operation == SUBTRACT)) {
+		bool gpu_used = _try_gpu_height_brush(p_global_position, edited_area, brush_size, strength, gamma, rot,
+				brush_ref, height, modifier_alt, regions_added_removed);
+		if (gpu_used) {
+			return;
+		}
+	}
 
 	for (real_t x = 0.f; x < brush_size; x += vertex_spacing) {
 		for (real_t y = 0.f; y < brush_size; y += vertex_spacing) {
@@ -628,7 +636,7 @@ bool Terrain3DEditor::_try_gpu_color_brush(const Vector3 &p_global_position, con
 	request.map_type = TYPE_COLOR;
 	request.center_world = p_global_position;
 	request.radius_world = p_brush_size * 0.5f;
-	request.strength = CLAMP(p_strength, 0.f, 1.f);
+	request.strength = Math::max(p_strength, 0.f);
 	request.gamma = Math::max(p_gamma, 0.01f);
 	request.rotation = p_rotation;
 	request.color = p_color;
@@ -668,6 +676,85 @@ bool Terrain3DEditor::_try_gpu_color_brush(const Vector3 &p_global_position, con
 	LOG(INFO, "GPU color brush applied via compute shader (regions=", int(request.regions.size()), ", radius=", request.radius_world, ")");
 	data->update_maps(TYPE_COLOR, true, true);
 	data->add_edited_area(p_edited_area);
+	return true;
+}
+
+bool Terrain3DEditor::_try_gpu_height_brush(const Vector3 &p_global_position, const AABB &p_edited_area,
+		const real_t p_brush_size, const real_t p_strength, const real_t p_gamma, const real_t p_rotation,
+		const Ref<Image> &p_brush_image, const real_t p_target_height, const bool p_modifier_alt,
+		const int p_regions_added_removed) {
+	Terrain3DData *data = _terrain->get_data();
+	(void)p_regions_added_removed;
+	if (!data || !data->is_gpu_workflow_ready()) {
+		LOG(INFO, "GPU height brush skipped: workflow not ready");
+		return false;
+	}
+	if (_tool != SCULPT && _tool != HEIGHT) {
+		LOG(INFO, "GPU height brush skipped: unsupported tool");
+		return false;
+	}
+	if (_operation != ADD && _operation != SUBTRACT) {
+		LOG(INFO, "GPU height brush skipped: unsupported operation ", _operation);
+		return false;
+	}
+	if (p_brush_image.is_null()) {
+		LOG(INFO, "GPU height brush skipped: brush image missing");
+		return false;
+	}
+	Terrain3DGpuBrushRequest request;
+	request.map_type = TYPE_HEIGHT;
+	request.center_world = p_global_position;
+	request.radius_world = p_brush_size * 0.5f;
+	request.strength = CLAMP(p_strength, 0.f, 1.f);
+	request.gamma = Math::max(p_gamma, 0.01f);
+	request.rotation = p_rotation;
+	request.mask = p_brush_image;
+	request.vertex_spacing = data->get_vertex_spacing();
+	request.region_size = data->get_region_size_value();
+	request.height_mode = (_tool == HEIGHT) ? Terrain3DGpuHeightMode::SET_TO_HEIGHT :
+		(_operation == SUBTRACT ? Terrain3DGpuHeightMode::LOWER : Terrain3DGpuHeightMode::RAISE);
+	request.height_use_alt = p_modifier_alt && _tool != HEIGHT && !std::isnan(p_global_position.y);
+	request.target_height = p_target_height;
+	request.cursor_height = p_global_position.y;
+	real_t radius = request.radius_world;
+	Vector2 brush_center = Vector2(p_global_position.x, p_global_position.z);
+	Vector2 min_point = brush_center - Vector2(radius, radius);
+	Vector2 max_point = brush_center + Vector2(radius, radius);
+	Vector2i loc_min = data->get_region_location(Vector3(min_point.x, 0.f, min_point.y));
+	Vector2i loc_max = data->get_region_location(Vector3(max_point.x, 0.f, max_point.y));
+	for (int y = loc_min.y - 1; y <= loc_max.y + 1; y++) {
+		for (int x = loc_min.x - 1; x <= loc_max.x + 1; x++) {
+			Vector2i region_loc(x, y);
+			Ref<Terrain3DRegion> region = _operate_region(region_loc);
+			if (region.is_null()) {
+				continue;
+			}
+			Terrain3DGpuBrushRegion job;
+			job.location = region_loc;
+			job.region = region;
+			request.regions.push_back(job);
+			backup_region(region);
+		}
+	}
+	if (request.regions.empty()) {
+		LOG(INFO, "GPU height brush skipped: no regions affected");
+		return false;
+	}
+	bool painted = data->apply_gpu_height_brush(request);
+	if (!painted) {
+		LOG(INFO, "GPU height brush skipped: GPU workflow refused request");
+		return false;
+	}
+	LOG(INFO, "GPU height brush applied via compute shader (regions=",
+		int(request.regions.size()), ", radius=", request.radius_world, ")");
+	data->update_maps(TYPE_HEIGHT, true, false);
+	data->add_edited_area(p_edited_area);
+	if (_tool == HEIGHT || _tool == SCULPT) {
+		_terrain->get_instancer()->update_transforms(p_edited_area);
+	}
+	if (_terrain->get_collision_mode() == Terrain3DCollision::DYNAMIC_EDITOR) {
+		_terrain->get_collision()->update(true);
+	}
 	return true;
 }
 

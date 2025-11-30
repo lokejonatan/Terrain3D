@@ -93,6 +93,7 @@ public:
 	bool is_gpu_workflow_enabled() const { return _gpu_workflow_enabled; }
 	bool is_gpu_workflow_ready() const;
 	bool apply_gpu_color_brush(const Terrain3DGpuBrushRequest &p_request);
+	bool apply_gpu_height_brush(const Terrain3DGpuBrushRequest &p_request);
 	void set_region_locations(const TypedArray<Vector2i> &p_locations);
 	TypedArray<Vector2i> get_region_locations() const { return _region_locations; }
 	TypedArray<Terrain3DRegion> get_regions_active(const bool p_copy = false, const bool p_deep = false) const;

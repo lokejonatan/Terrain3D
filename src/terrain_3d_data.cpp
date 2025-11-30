@@ -106,6 +106,13 @@ bool Terrain3DData::apply_gpu_color_brush(const Terrain3DGpuBrushRequest &p_requ
 	return _gpu_workflow->apply_color_brush(p_request);
 }
 
+bool Terrain3DData::apply_gpu_height_brush(const Terrain3DGpuBrushRequest &p_request) {
+	if (!is_gpu_workflow_ready()) {
+		return false;
+	}
+	return _gpu_workflow->apply_height_brush(p_request);
+}
+
 void Terrain3DData::set_region_locations(const TypedArray<Vector2i> &p_locations) {
 	SET_IF_DIFF(_region_locations, p_locations);
 	LOG(INFO, "Setting _region_locations with array sized: ", p_locations.size());

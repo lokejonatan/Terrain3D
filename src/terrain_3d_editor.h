@@ -101,6 +101,9 @@ private:
 			const real_t p_strength, const real_t p_gamma, const real_t p_rotation, const Ref<Image> &p_brush_image,
 			const Color &p_color, const Vector2 &p_slope_range, const bool p_texture_filter,
 			const int p_regions_added_removed);
+	bool _try_gpu_height_brush(const Vector3 &p_global_position, const AABB &p_edited_area, const real_t p_brush_size,
+			const real_t p_strength, const real_t p_gamma, const real_t p_rotation, const Ref<Image> &p_brush_image,
+			const real_t p_target_height, const bool p_modifier_alt, const int p_regions_added_removed);
 	void _store_undo();
 	void _apply_undo(const Dictionary &p_data);
 	real_t _average(const AverageMode p_mode, const Vector3 &p_global_position, const real_t p_base, const real_t p_nan_val = 0.f, bool p_alt = false) const;
