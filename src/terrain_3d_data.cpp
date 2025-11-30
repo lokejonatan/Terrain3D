@@ -75,12 +75,21 @@ void Terrain3DData::initialize(Terrain3D *p_terrain) {
 }
 
 void Terrain3DData::set_gpu_workflow_enabled(const bool p_enabled) {
+	if (_gpu_workflow_enabled == p_enabled) {
+		return;
+	}
 	_gpu_workflow_enabled = p_enabled;
+	LOG(INFO, "GPU workflow ", _gpu_workflow_enabled ? "enabled" : "disabled");
 	if (_gpu_workflow_enabled) {
 		if (!_gpu_workflow) {
 			_gpu_workflow = memnew(Terrain3DGpuWorkflow);
 		}
 		_gpu_workflow->initialize(this);
+		if (_gpu_workflow->is_ready()) {
+			LOG(INFO, "GPU workflow ready (compute pipeline compiled)");
+		} else {
+			LOG(WARN, "GPU workflow failed to initialize; falling back to CPU");
+		}
 	} else if (_gpu_workflow) {
 		_gpu_workflow->shutdown();
 	}

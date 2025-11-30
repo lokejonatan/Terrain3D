@@ -599,6 +599,7 @@ bool Terrain3DEditor::_try_gpu_color_brush(const Vector3 &p_global_position, con
 		const Ref<Image> &p_brush_image, const Color &p_color, const Vector2 &p_slope_range,
 		const bool p_texture_filter, const int p_regions_added_removed) {
 	Terrain3DData *data = _terrain->get_data();
+	(void)p_regions_added_removed;
 	if (!data || !data->is_gpu_workflow_ready()) {
 		return false;
 	}
@@ -656,16 +657,7 @@ bool Terrain3DEditor::_try_gpu_color_brush(const Vector3 &p_global_position, con
 	if (!painted) {
 		return false;
 	}
-	for (const Terrain3DGpuBrushRegion &region_info : request.regions) {
-		if (region_info.region.is_valid()) {
-			region_info.region->get_color_map()->generate_mipmaps();
-		}
-	}
-	if (_added_removed_locations.size() == p_regions_added_removed) {
-		data->update_maps(TYPE_COLOR, false, false);
-	} else {
-		data->update_maps(TYPE_COLOR, true, true);
-	}
+	data->update_maps(TYPE_COLOR, true, true);
 	data->add_edited_area(p_edited_area);
 	return true;
 }

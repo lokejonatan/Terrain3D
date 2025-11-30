@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/rd_shader_source.hpp>
 #include <godot_cpp/classes/rd_shader_spirv.hpp>
 #include <godot_cpp/classes/rd_texture_format.hpp>
@@ -14,6 +15,7 @@
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/rect2i.hpp>
+#include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
 
 #include "logger.h"
@@ -22,6 +24,23 @@
 namespace {
 
 CLASS_NAME_STATIC("Terrain3DGpuWorkflow");
+
+static bool _image_has_pixels(const Ref<Image> &p_image, const String &p_label) {
+	if (p_image.is_null()) {
+		LOG(WARN, "Image for ", p_label, " is null");
+		return false;
+	}
+	Vector2i size = p_image->get_size();
+	if (size.x <= 0 || size.y <= 0) {
+		LOG(WARN, "Image for ", p_label, " has invalid size ", size);
+		return false;
+	}
+	if (p_image->is_empty()) {
+		LOG(WARN, "Image for ", p_label, " has no pixel data");
+		return false;
+	}
+	return true;
+}
 
 struct BrushPushConstant {
 	int32_t target_origin_x = 0;
@@ -196,12 +215,40 @@ Terrain3DGpuWorkflow::RegionGpuState &Terrain3DGpuWorkflow::_get_or_create_regio
 		color_map = p_region->get_color_map();
 	}
 	if (color_map.is_valid()) {
-		if (color_map->get_format() != Image::FORMAT_RGBA8) {
-			color_map = color_map->duplicate();
-			color_map->convert(Image::FORMAT_RGBA8);
+		if (p_region->get_region_size() <= 0) {
+			LOG(WARN, "Region ", p_region_loc, " has invalid region size; skipping GPU upload");
+			auto inserted = _region_color_textures.insert({ p_region_loc, state });
+			return inserted.first->second;
 		}
-		state.size = color_map->get_size();
-		state.color_texture = _create_texture_from_image(color_map, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM,
+		Vector2i map_size = color_map->get_size();
+		if (map_size.x <= 0 || map_size.y <= 0) {
+			LOG(WARN, "Region ", p_region_loc, " color map size invalid (", map_size, ")");
+			auto inserted = _region_color_textures.insert({ p_region_loc, state });
+			return inserted.first->second;
+		}
+		Ref<Image> upload_image = color_map;
+		bool needs_copy = color_map->has_mipmaps() || color_map->get_format() != Image::FORMAT_RGBA8;
+		if (needs_copy) {
+			upload_image = color_map->duplicate();
+			if (upload_image.is_null()) {
+				LOG(ERROR, "Failed to duplicate color map for region ", p_region_loc);
+				auto inserted = _region_color_textures.insert({ p_region_loc, state });
+				return inserted.first->second;
+			}
+			if (upload_image->get_format() != Image::FORMAT_RGBA8) {
+				upload_image->convert(Image::FORMAT_RGBA8);
+			}
+		}
+		if (upload_image->has_mipmaps()) {
+			upload_image->clear_mipmaps();
+		}
+		if (!_image_has_pixels(upload_image, "region color map")) {
+			auto inserted = _region_color_textures.insert({ p_region_loc, state });
+			return inserted.first->second;
+		}
+		map_size = upload_image->get_size();
+		state.size = map_size;
+		state.color_texture = _create_texture_from_image(upload_image, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM,
 				RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_STORAGE_BIT |
 				RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT);
 	}
@@ -211,7 +258,7 @@ Terrain3DGpuWorkflow::RegionGpuState &Terrain3DGpuWorkflow::_get_or_create_regio
 
 RID Terrain3DGpuWorkflow::_create_texture_from_image(const Ref<Image> &p_image, RenderingDevice::DataFormat p_format,
 		BitField<RenderingDevice::TextureUsageBits> p_usage) {
-	if (!_rd || p_image.is_null()) {
+	if (!_rd || !_image_has_pixels(p_image, "texture upload")) {
 		return RID();
 	}
 	Ref<RDTextureFormat> fmt;
@@ -241,7 +288,16 @@ RID Terrain3DGpuWorkflow::_create_mask_texture(const Ref<Image> &p_mask, Vector2
 	Ref<Image> mask = p_mask;
 	if (mask->get_format() != Image::FORMAT_RF) {
 		mask = mask->duplicate();
+		if (mask.is_null()) {
+			LOG(ERROR, "Failed to duplicate brush mask image");
+			r_size = _fallback_mask_size;
+			return _fallback_mask_texture;
+		}
 		mask->convert(Image::FORMAT_RF);
+	}
+	if (!_image_has_pixels(mask, "brush mask")) {
+		r_size = _fallback_mask_size;
+		return _fallback_mask_texture;
 	}
 	r_size = mask->get_size();
 	return _create_texture_from_image(mask, RenderingDevice::DATA_FORMAT_R32_SFLOAT,
