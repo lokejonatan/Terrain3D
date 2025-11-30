@@ -43,7 +43,7 @@ static bool _image_has_pixels(const Ref<Image> &p_image, const String &p_label) 
 	return true;
 }
 
-struct BrushPushConstant {
+struct ColorBrushPushConstant {
 	int32_t target_origin_x = 0;
 	int32_t target_origin_y = 0;
 	int32_t target_size_x = 0;
@@ -68,6 +68,30 @@ struct BrushPushConstant {
 	float padding[3] = { 0.f, 0.f, 0.f };
 };
 
+struct HeightBrushPushConstant {
+	int32_t target_origin_x = 0;
+	int32_t target_origin_y = 0;
+	int32_t target_size_x = 0;
+	int32_t target_size_y = 0;
+	int32_t texture_width = 0;
+	int32_t texture_height = 0;
+	int32_t mask_width = 0;
+	int32_t mask_height = 0;
+	float brush_center_x = 0.f;
+	float brush_center_y = 0.f;
+	float radius = 0.f;
+	float inv_radius = 0.f;
+	float strength = 0.f;
+	float gamma = 1.f;
+	float rotation_cos = 1.f;
+	float rotation_sin = 0.f;
+	float target_height = 0.f;
+	float cursor_height = 0.f;
+	int32_t height_mode = 0;
+	int32_t use_alt = 0;
+	float padding[4] = { 0.f, 0.f, 0.f, 0.f };
+};
+
 } // namespace
 
 Terrain3DGpuWorkflow::~Terrain3DGpuWorkflow() {
@@ -82,32 +106,40 @@ void Terrain3DGpuWorkflow::initialize(Terrain3DData *p_data) {
 		_ready = false;
 		return;
 	}
-	if (!_ensure_pipeline()) {
+	if (!_ensure_color_pipeline()) {
 		_ready = false;
 		return;
 	}
 	_ensure_fallback_mask();
-	_ready = _brush_pipeline.is_valid();
+	_ready = _color_pipeline.is_valid();
 }
 
 void Terrain3DGpuWorkflow::shutdown() {
-	for (auto &entry : _region_color_textures) {
+	for (auto &entry : _region_gpu_states) {
 		_free_region_state(entry.second);
 	}
-	_region_color_textures.clear();
+	_region_gpu_states.clear();
 	if (_rd) {
-		if (_brush_pipeline.is_valid()) {
-			_rd->free_rid(_brush_pipeline);
+		if (_color_pipeline.is_valid()) {
+			_rd->free_rid(_color_pipeline);
 		}
-		if (_brush_shader.is_valid()) {
-			_rd->free_rid(_brush_shader);
+		if (_color_shader.is_valid()) {
+			_rd->free_rid(_color_shader);
+		}
+		if (_height_pipeline.is_valid()) {
+			_rd->free_rid(_height_pipeline);
+		}
+		if (_height_shader.is_valid()) {
+			_rd->free_rid(_height_shader);
 		}
 		if (_fallback_mask_texture.is_valid()) {
 			_rd->free_rid(_fallback_mask_texture);
 		}
 	}
-	_brush_pipeline = RID();
-	_brush_shader = RID();
+	_color_pipeline = RID();
+	_color_shader = RID();
+	_height_pipeline = RID();
+	_height_shader = RID();
 	_fallback_mask_texture = RID();
 	_rd = nullptr;
 	_ready = false;
@@ -118,6 +150,9 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 		return false;
 	}
 	if (p_request.map_type != TYPE_COLOR) {
+		return false;
+	}
+	if (!_ensure_color_pipeline()) {
 		return false;
 	}
 	Vector2i mask_size = _fallback_mask_size;
@@ -136,7 +171,7 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 		if (!region_ptr) {
 			continue;
 		}
-		RegionGpuState &state = _get_or_create_region_state(region_info.location, region_ptr);
+		RegionGpuState &state = _get_or_create_region_state(region_info.location, region_ptr, p_request.map_type);
 		if (!state.color_texture.is_valid()) {
 			continue;
 		}
@@ -158,17 +193,66 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 	return true;
 }
 
+bool Terrain3DGpuWorkflow::apply_height_brush(const Terrain3DGpuBrushRequest &p_request) {
+	if (!_ready || !_rd) {
+		return false;
+	}
+	if (p_request.map_type != TYPE_HEIGHT) {
+		return false;
+	}
+	if (!_ensure_height_pipeline()) {
+		return false;
+	}
+	Vector2i mask_size = _fallback_mask_size;
+	RID mask_texture = _fallback_mask_texture;
+	if (p_request.mask.is_valid()) {
+		mask_texture = _create_mask_texture(p_request.mask, mask_size);
+		if (!mask_texture.is_valid()) {
+			mask_texture = _fallback_mask_texture;
+			mask_size = _fallback_mask_size;
+		}
+	}
+	int dispatch_count = 0;
+	for (const Terrain3DGpuBrushRegion &region_info : p_request.regions) {
+		Terrain3DRegion *region_ptr = region_info.region.ptr();
+		if (!region_ptr) {
+			continue;
+		}
+		RegionGpuState &state = _get_or_create_region_state(region_info.location, region_ptr, p_request.map_type);
+		if (!state.height_texture.is_valid()) {
+			continue;
+		}
+		bool dispatched = _dispatch_height_brush(p_request, region_info, state, mask_texture, mask_size);
+		if (dispatched) {
+			_readback_height_region(region_info, state);
+			dispatch_count++;
+		}
+	}
+	if (mask_texture.is_valid() && mask_texture != _fallback_mask_texture) {
+		_rd->free_rid(mask_texture);
+	}
+	if (dispatch_count == 0) {
+		LOG(INFO, "GPU workflow skipped height request: no eligible regions or target bounds");
+		return false;
+	}
+	LOG(INFO, "GPU workflow dispatched height brush to ", dispatch_count, " region(s)");
+	return true;
+}
+
 void Terrain3DGpuWorkflow::remove_region(const Vector2i &p_region_loc) {
-	auto found = _region_color_textures.find(p_region_loc);
-	if (found != _region_color_textures.end()) {
+	auto found = _region_gpu_states.find(p_region_loc);
+	if (found != _region_gpu_states.end()) {
 		_free_region_state(found->second);
-		_region_color_textures.erase(found);
+		_region_gpu_states.erase(found);
 	}
 }
 
-bool Terrain3DGpuWorkflow::_ensure_pipeline() {
-	if (_brush_pipeline.is_valid()) {
+bool Terrain3DGpuWorkflow::_ensure_color_pipeline() {
+	if (_color_pipeline.is_valid()) {
 		return true;
+	}
+	if (!_rd) {
+		return false;
 	}
 	String shader_code = String(
 #include "shaders/terrain_gpu_brush.glsl"
@@ -178,19 +262,52 @@ bool Terrain3DGpuWorkflow::_ensure_pipeline() {
 	source->set_stage_source(RenderingDevice::SHADER_STAGE_COMPUTE, shader_code);
 	Ref<RDShaderSPIRV> spirv = _rd->shader_compile_spirv_from_source(source);
 	if (spirv.is_null()) {
-		LOG(ERROR, "Failed to compile GPU brush shader");
+		LOG(ERROR, "Failed to compile GPU color brush shader");
 		return false;
 	}
-	_brush_shader = _rd->shader_create_from_spirv(spirv);
-	if (!_brush_shader.is_valid()) {
-		LOG(ERROR, "Failed to create GPU brush shader RID");
+	_color_shader = _rd->shader_create_from_spirv(spirv);
+	if (!_color_shader.is_valid()) {
+		LOG(ERROR, "Failed to create GPU color brush shader RID");
 		return false;
 	}
-	_brush_pipeline = _rd->compute_pipeline_create(_brush_shader);
-	if (!_brush_pipeline.is_valid()) {
-		LOG(ERROR, "Failed to create GPU brush pipeline");
-		_rd->free_rid(_brush_shader);
-		_brush_shader = RID();
+	_color_pipeline = _rd->compute_pipeline_create(_color_shader);
+	if (!_color_pipeline.is_valid()) {
+		LOG(ERROR, "Failed to create GPU color brush pipeline");
+		_rd->free_rid(_color_shader);
+		_color_shader = RID();
+		return false;
+	}
+	return true;
+}
+
+bool Terrain3DGpuWorkflow::_ensure_height_pipeline() {
+	if (_height_pipeline.is_valid()) {
+		return true;
+	}
+	if (!_rd) {
+		return false;
+	}
+	String shader_code = String(
+#include "shaders/terrain_gpu_height_brush.glsl"
+	);
+	Ref<RDShaderSource> source;
+	source.instantiate();
+	source->set_stage_source(RenderingDevice::SHADER_STAGE_COMPUTE, shader_code);
+	Ref<RDShaderSPIRV> spirv = _rd->shader_compile_spirv_from_source(source);
+	if (spirv.is_null()) {
+		LOG(ERROR, "Failed to compile GPU height brush shader");
+		return false;
+	}
+	_height_shader = _rd->shader_create_from_spirv(spirv);
+	if (!_height_shader.is_valid()) {
+		LOG(ERROR, "Failed to create GPU height brush shader RID");
+		return false;
+	}
+	_height_pipeline = _rd->compute_pipeline_create(_height_shader);
+	if (!_height_pipeline.is_valid()) {
+		LOG(ERROR, "Failed to create GPU height brush pipeline");
+		_rd->free_rid(_height_shader);
+		_height_shader = RID();
 		return false;
 	}
 	return true;
@@ -215,28 +332,41 @@ void Terrain3DGpuWorkflow::_ensure_fallback_mask() {
 	}
 }
 
-Terrain3DGpuWorkflow::RegionGpuState &Terrain3DGpuWorkflow::_get_or_create_region_state(const Vector2i &p_region_loc, Terrain3DRegion *p_region) {
-	auto found = _region_color_textures.find(p_region_loc);
-	if (found != _region_color_textures.end()) {
-		return found->second;
+Terrain3DGpuWorkflow::RegionGpuState &Terrain3DGpuWorkflow::_get_or_create_region_state(const Vector2i &p_region_loc, Terrain3DRegion *p_region, MapType p_map_type) {
+	auto found = _region_gpu_states.find(p_region_loc);
+	if (found == _region_gpu_states.end()) {
+		found = _region_gpu_states.insert({ p_region_loc, RegionGpuState{} }).first;
 	}
-	RegionGpuState state;
-	Ref<Image> color_map = p_region->get_color_map();
-	if (color_map.is_null()) {
-		p_region->sanitize_maps();
-		color_map = p_region->get_color_map();
+	RegionGpuState &state = found->second;
+	if (!p_region) {
+		return state;
 	}
-	if (color_map.is_valid()) {
-		if (p_region->get_region_size() <= 0) {
-			LOG(WARN, "Region ", p_region_loc, " has invalid region size; skipping GPU upload");
-			auto inserted = _region_color_textures.insert({ p_region_loc, state });
-			return inserted.first->second;
+	if (p_region->get_region_size() <= 0) {
+		LOG(WARN, "Region ", p_region_loc, " has invalid region size; skipping GPU upload");
+		return state;
+	}
+	auto ensure_size = [&](const Vector2i &p_candidate) {
+		if (state.size == V2I_ZERO) {
+			state.size = p_candidate;
+			return true;
 		}
-		Vector2i map_size = color_map->get_size();
-		if (map_size.x <= 0 || map_size.y <= 0) {
-			LOG(WARN, "Region ", p_region_loc, " color map size invalid (", map_size, ")");
-			auto inserted = _region_color_textures.insert({ p_region_loc, state });
-			return inserted.first->second;
+		if (state.size != p_candidate) {
+			LOG(WARN, "Region ", p_region_loc, " map sizes mismatch between uploads (existing=", state.size, ", new=", p_candidate, ")");
+			return false;
+		}
+		return true;
+	};
+	auto upload_color = [&]() {
+		if (state.color_texture.is_valid()) {
+			return;
+		}
+		Ref<Image> color_map = p_region->get_color_map();
+		if (color_map.is_null()) {
+			p_region->sanitize_maps();
+			color_map = p_region->get_color_map();
+		}
+		if (color_map.is_null()) {
+			return;
 		}
 		Ref<Image> upload_image = color_map;
 		bool needs_copy = color_map->has_mipmaps() || color_map->get_format() != Image::FORMAT_RGBA8;
@@ -244,8 +374,7 @@ Terrain3DGpuWorkflow::RegionGpuState &Terrain3DGpuWorkflow::_get_or_create_regio
 			upload_image = color_map->duplicate();
 			if (upload_image.is_null()) {
 				LOG(ERROR, "Failed to duplicate color map for region ", p_region_loc);
-				auto inserted = _region_color_textures.insert({ p_region_loc, state });
-				return inserted.first->second;
+				return;
 			}
 			if (upload_image->get_format() != Image::FORMAT_RGBA8) {
 				upload_image->convert(Image::FORMAT_RGBA8);
@@ -255,17 +384,65 @@ Terrain3DGpuWorkflow::RegionGpuState &Terrain3DGpuWorkflow::_get_or_create_regio
 			upload_image->clear_mipmaps();
 		}
 		if (!_image_has_pixels(upload_image, "region color map")) {
-			auto inserted = _region_color_textures.insert({ p_region_loc, state });
-			return inserted.first->second;
+			return;
 		}
-		map_size = upload_image->get_size();
-		state.size = map_size;
+		Vector2i map_size = upload_image->get_size();
+		if (!ensure_size(map_size)) {
+			return;
+		}
 		state.color_texture = _create_texture_from_image(upload_image, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM,
 				RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_STORAGE_BIT |
 				RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT);
+	};
+	auto upload_height = [&]() {
+		if (state.height_texture.is_valid()) {
+			return;
+		}
+		Ref<Image> height_map = p_region->get_height_map();
+		if (height_map.is_null()) {
+			p_region->sanitize_maps();
+			height_map = p_region->get_height_map();
+		}
+		if (height_map.is_null()) {
+			return;
+		}
+		Ref<Image> upload_image = height_map;
+		bool needs_copy = height_map->has_mipmaps() || height_map->get_format() != Image::FORMAT_RF;
+		if (needs_copy) {
+			upload_image = height_map->duplicate();
+			if (upload_image.is_null()) {
+				LOG(ERROR, "Failed to duplicate height map for region ", p_region_loc);
+				return;
+			}
+			if (upload_image->get_format() != Image::FORMAT_RF) {
+				upload_image->convert(Image::FORMAT_RF);
+			}
+		}
+		if (upload_image->has_mipmaps()) {
+			upload_image->clear_mipmaps();
+		}
+		if (!_image_has_pixels(upload_image, "region height map")) {
+			return;
+		}
+		Vector2i map_size = upload_image->get_size();
+		if (!ensure_size(map_size)) {
+			return;
+		}
+		state.height_texture = _create_texture_from_image(upload_image, RenderingDevice::DATA_FORMAT_R32_SFLOAT,
+				RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_STORAGE_BIT |
+				RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT);
+	};
+	switch (p_map_type) {
+		case TYPE_COLOR:
+			upload_color();
+			break;
+		case TYPE_HEIGHT:
+			upload_height();
+			break;
+		default:
+			break;
 	}
-	auto inserted = _region_color_textures.insert({ p_region_loc, state });
-	return inserted.first->second;
+	return state;
 }
 
 RID Terrain3DGpuWorkflow::_create_texture_from_image(const Ref<Image> &p_image, RenderingDevice::DataFormat p_format,
@@ -324,7 +501,11 @@ void Terrain3DGpuWorkflow::_free_region_state(RegionGpuState &p_state) {
 	if (_rd && p_state.color_texture.is_valid()) {
 		_rd->free_rid(p_state.color_texture);
 	}
+	if (_rd && p_state.height_texture.is_valid()) {
+		_rd->free_rid(p_state.height_texture);
+	}
 	p_state.color_texture = RID();
+	p_state.height_texture = RID();
 	p_state.size = V2I_ZERO;
 }
 
@@ -349,9 +530,34 @@ void Terrain3DGpuWorkflow::_readback_color_region(const Terrain3DGpuBrushRegion 
 	p_region_info.region->set_edited(true);
 }
 
+void Terrain3DGpuWorkflow::_readback_height_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state) {
+	if (!_rd || !p_state.height_texture.is_valid()) {
+		return;
+	}
+	PackedByteArray data = _rd->texture_get_data(p_state.height_texture, 0);
+	if (data.is_empty()) {
+		return;
+	}
+	Ref<Image> img = p_region_info.region->get_height_map();
+	if (img.is_null()) {
+		img.instantiate();
+		img->create(p_state.size.x, p_state.size.y, false, Image::FORMAT_RF);
+		img->set_data(p_state.size.x, p_state.size.y, false, Image::FORMAT_RF, data);
+		p_region_info.region->set_height_map(img);
+	} else {
+		img->set_data(p_state.size.x, p_state.size.y, false, Image::FORMAT_RF, data);
+	}
+	p_region_info.region->calc_height_range();
+	p_region_info.region->set_modified(true);
+	p_region_info.region->set_edited(true);
+	if (_data) {
+		_data->update_master_heights(p_region_info.region->get_height_range());
+	}
+}
+
 bool Terrain3DGpuWorkflow::_dispatch_color_brush(const Terrain3DGpuBrushRequest &p_request, const Terrain3DGpuBrushRegion &p_region_info,
 		const RegionGpuState &p_state, const RID &p_mask_texture, const Vector2i &p_mask_size) {
-	if (!_rd || !_brush_pipeline.is_valid()) {
+	if (!_rd || !_color_pipeline.is_valid()) {
 		return false;
 	}
 	Vector2 center_descaled = Vector2(p_request.center_world.x, p_request.center_world.z) / p_request.vertex_spacing;
@@ -382,13 +588,13 @@ bool Terrain3DGpuWorkflow::_dispatch_color_brush(const Terrain3DGpuBrushRequest 
 	TypedArray<Ref<RDUniform>> uniforms;
 	uniforms.push_back(map_uniform);
 	uniforms.push_back(mask_uniform);
-	RID uniform_set = _rd->uniform_set_create(uniforms, _brush_shader, 0);
+	RID uniform_set = _rd->uniform_set_create(uniforms, _color_shader, 0);
 	if (!uniform_set.is_valid()) {
 		LOG(ERROR, "Failed to create uniform set for GPU brush");
 		return false;
 	}
 
-	BrushPushConstant push;
+	ColorBrushPushConstant push;
 	push.target_origin_x = target_rect.position.x;
 	push.target_origin_y = target_rect.position.y;
 	push.target_size_x = target_rect.size.x;
@@ -412,19 +618,94 @@ bool Terrain3DGpuWorkflow::_dispatch_color_brush(const Terrain3DGpuBrushRequest 
 	push.color_mode = static_cast<int32_t>(p_request.color_mode);
 
 	PackedByteArray push_bytes;
-	push_bytes.resize(sizeof(BrushPushConstant));
-	std::memcpy(push_bytes.ptrw(), &push, sizeof(BrushPushConstant));
+	push_bytes.resize(sizeof(ColorBrushPushConstant));
+	std::memcpy(push_bytes.ptrw(), &push, sizeof(ColorBrushPushConstant));
 
 	int64_t compute_list = _rd->compute_list_begin();
-	_rd->compute_list_bind_compute_pipeline(compute_list, _brush_pipeline);
+	_rd->compute_list_bind_compute_pipeline(compute_list, _color_pipeline);
 	_rd->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 	_rd->compute_list_set_push_constant(compute_list, push_bytes, push_bytes.size());
 	uint32_t group_x = (target_rect.size.x + 7) / 8;
 	uint32_t group_y = (target_rect.size.y + 7) / 8;
 	_rd->compute_list_dispatch(compute_list, group_x, group_y, 1);
 	_rd->compute_list_end();
-	_rd->submit();
-	_rd->sync();
+	_rd->free_rid(uniform_set);
+	return true;
+}
+
+bool Terrain3DGpuWorkflow::_dispatch_height_brush(const Terrain3DGpuBrushRequest &p_request, const Terrain3DGpuBrushRegion &p_region_info,
+		const RegionGpuState &p_state, const RID &p_mask_texture, const Vector2i &p_mask_size) {
+	if (!_rd || !_height_pipeline.is_valid()) {
+		return false;
+	}
+	Vector2 center_descaled = Vector2(p_request.center_world.x, p_request.center_world.z) / p_request.vertex_spacing;
+	Vector2 region_origin = Vector2(p_region_info.location) * real_t(p_request.region_size);
+	Vector2 brush_center = center_descaled - region_origin;
+	float radius_pixels = p_request.radius_world / p_request.vertex_spacing;
+	Rect2i region_bounds(Vector2i(), p_state.size);
+	Rect2i brush_bounds(
+		Vector2i(int(Math::floor(brush_center.x - radius_pixels - 1.f)), int(Math::floor(brush_center.y - radius_pixels - 1.f))),
+		Vector2i(int(Math::ceil(radius_pixels * 2.f) + 2), int(Math::ceil(radius_pixels * 2.f) + 2)));
+	Rect2i target_rect = brush_bounds.intersection(region_bounds);
+	if (target_rect.size.x <= 0 || target_rect.size.y <= 0) {
+		return false;
+	}
+
+	Ref<RDUniform> map_uniform;
+	map_uniform.instantiate();
+	map_uniform->set_uniform_type(RenderingDevice::UNIFORM_TYPE_IMAGE);
+	map_uniform->set_binding(0);
+	map_uniform->add_id(p_state.height_texture);
+
+	Ref<RDUniform> mask_uniform;
+	mask_uniform.instantiate();
+	mask_uniform->set_uniform_type(RenderingDevice::UNIFORM_TYPE_IMAGE);
+	mask_uniform->set_binding(1);
+	mask_uniform->add_id(p_mask_texture);
+
+	TypedArray<Ref<RDUniform>> uniforms;
+	uniforms.push_back(map_uniform);
+	uniforms.push_back(mask_uniform);
+	RID uniform_set = _rd->uniform_set_create(uniforms, _height_shader, 0);
+	if (!uniform_set.is_valid()) {
+		LOG(ERROR, "Failed to create uniform set for GPU height brush");
+		return false;
+	}
+
+	HeightBrushPushConstant push;
+	push.target_origin_x = target_rect.position.x;
+	push.target_origin_y = target_rect.position.y;
+	push.target_size_x = target_rect.size.x;
+	push.target_size_y = target_rect.size.y;
+	push.texture_width = p_state.size.x;
+	push.texture_height = p_state.size.y;
+	push.mask_width = p_mask_size.x;
+	push.mask_height = p_mask_size.y;
+	push.brush_center_x = brush_center.x;
+	push.brush_center_y = brush_center.y;
+	push.radius = Math::max(radius_pixels, 0.001f);
+	push.inv_radius = 1.f / push.radius;
+	push.strength = p_request.strength;
+	push.gamma = Math::max(p_request.gamma, 0.0001f);
+	push.rotation_cos = Math::cos(p_request.rotation);
+	push.rotation_sin = Math::sin(p_request.rotation);
+	push.target_height = p_request.target_height;
+	push.cursor_height = p_request.cursor_height;
+	push.height_mode = static_cast<int32_t>(p_request.height_mode);
+	push.use_alt = p_request.height_use_alt ? 1 : 0;
+
+	PackedByteArray push_bytes;
+	push_bytes.resize(sizeof(HeightBrushPushConstant));
+	std::memcpy(push_bytes.ptrw(), &push, sizeof(HeightBrushPushConstant));
+
+	int64_t compute_list = _rd->compute_list_begin();
+	_rd->compute_list_bind_compute_pipeline(compute_list, _height_pipeline);
+	_rd->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+	_rd->compute_list_set_push_constant(compute_list, push_bytes, push_bytes.size());
+	uint32_t group_x = (target_rect.size.x + 7) / 8;
+	uint32_t group_y = (target_rect.size.y + 7) / 8;
+	_rd->compute_list_dispatch(compute_list, group_x, group_y, 1);
+	_rd->compute_list_end();
 	_rd->free_rid(uniform_set);
 	return true;
 }
