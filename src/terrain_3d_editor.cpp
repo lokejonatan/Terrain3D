@@ -114,7 +114,11 @@ void Terrain3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 		return;
 	}
 	Vector2i img_size = _brush_data["brush_image_size"];
-	real_t brush_size = CLAMP(real_t(_brush_data.get("size", 10.f)), 2.f, 4096.f); // Meters
+	real_t max_brush_size = 4096.f;
+	if (data && data->is_gpu_workflow_ready() && (_tool == COLOR || _tool == HEIGHT || _tool == SCULPT)) {
+		max_brush_size = 16384.f;
+	}
+	real_t brush_size = CLAMP(real_t(_brush_data.get("size", 10.f)), 2.f, max_brush_size); // Meters
 
 	// Typicall we multiply mouse pressure & strength setting, but
 	// * Mouse movement w/ button down has a pressure of 1
@@ -705,7 +709,8 @@ bool Terrain3DEditor::_try_gpu_height_brush(const Vector3 &p_global_position, co
 	request.map_type = TYPE_HEIGHT;
 	request.center_world = p_global_position;
 	request.radius_world = p_brush_size * 0.5f;
-	request.strength = CLAMP(p_strength, 0.f, 1.f);
+	real_t gpu_strength = CLAMP(p_strength, 0.f, 1000.f);
+	request.strength = gpu_strength;
 	request.gamma = Math::max(p_gamma, 0.01f);
 	request.rotation = p_rotation;
 	request.mask = p_brush_image;
@@ -1031,7 +1036,14 @@ void Terrain3DEditor::set_brush_data(const Dictionary &p_data) {
 
 	// Santize settings
 	// size is redundantly clamped differently in _operate_map and instancer::add_transforms
-	_brush_data["size"] = CLAMP(real_t(p_data.get("size", 10.f)), 0.1f, 4096.f); // Diameter in meters
+	real_t max_brush_size = 4096.f;
+	if (_terrain) {
+		Terrain3DData *data = _terrain->get_data();
+		if (data && data->is_gpu_workflow_ready() && (_tool == COLOR || _tool == HEIGHT || _tool == SCULPT)) {
+			max_brush_size = 16384.f;
+		}
+	}
+	_brush_data["size"] = CLAMP(real_t(p_data.get("size", 10.f)), 0.1f, max_brush_size); // Diameter in meters
 	_brush_data["strength"] = CLAMP(real_t(p_data.get("strength", .1f)) * .01f, .01f, 1000.f); // 1-100k% (max of 1000m per click)
 	// mouse_pressure injected in editor.gd and sanitized in _operate_map()
 	Vector2 slope = p_data.get("slope", Vector2(0.f, 90.f));

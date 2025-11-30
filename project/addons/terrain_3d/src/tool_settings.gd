@@ -501,8 +501,10 @@ func add_setting(p_args: Dictionary) -> void:
 				slider.share(spin_slider)
 				if p_flags & ALLOW_LARGER:
 					slider.set_allow_greater(true)
+					spin_slider.set_allow_greater(true)
 				if p_flags & ALLOW_SMALLER:
 					slider.set_allow_lesser(true)
+					spin_slider.set_allow_lesser(true)
 				
 				pending_children.push_back(slider)
 				pending_children.push_back(spin_slider)

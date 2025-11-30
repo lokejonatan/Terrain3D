@@ -89,8 +89,10 @@ void main() {
 
 	vec2 normalized = rotate_uv(center_offset / (params.radius * 2.0)) + vec2(0.5);
 	float mask = pow(max(sample_mask(normalized), 0.0), params.gamma);
-	float falloff = pow(max(1.0 - dist, 0.0), 2.0);
-	float influence = max(mask * falloff * params.strength, 0.0);
+	if (mask <= 0.0) {
+		return;
+	}
+	float influence = max(mask * params.strength, 0.0);
 
 	vec4 src_texel = imageLoad(height_map, pixel);
 	float result = apply_height(src_texel.r, influence);
