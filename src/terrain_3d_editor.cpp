@@ -108,7 +108,8 @@ void Terrain3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 	//bool modifier_shift = _brush_data["modifier_shift"];
 
 	Image *brush_image = cast_to<Image>(_brush_data["brush_image"]);
-	if (!brush_image) {
+	Ref<Image> brush_ref = _brush_data["brush_image"];
+	if (!brush_image || brush_ref.is_null()) {
 		LOG(ERROR, "Invalid brush image. Returning");
 		return;
 	}
@@ -184,6 +185,14 @@ void Terrain3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 	// rebuild at the end of the last _operate() call, but until painting is finished we only
 	// need to track if _added_removed_locations has changed between now and the end of the loop
 	int regions_added_removed = _added_removed_locations.size();
+
+	if (data->is_gpu_workflow_ready() && _tool == COLOR && ( _operation == ADD || _operation == SUBTRACT)) {
+		bool gpu_used = _try_gpu_color_brush(p_global_position, edited_area, brush_size, strength, gamma, rot,
+				brush_ref, color, slope_range, texture_filter, regions_added_removed);
+		if (gpu_used) {
+			return;
+		}
+	}
 
 	for (real_t x = 0.f; x < brush_size; x += vertex_spacing) {
 		for (real_t y = 0.f; y < brush_size; y += vertex_spacing) {
@@ -583,6 +592,82 @@ void Terrain3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 	if (_tool == HEIGHT || _tool == SCULPT || _tool == TEXTURE || _tool == AUTOSHADER) {
 		_terrain->snap();
 	}
+}
+
+bool Terrain3DEditor::_try_gpu_color_brush(const Vector3 &p_global_position, const AABB &p_edited_area,
+		const real_t p_brush_size, const real_t p_strength, const real_t p_gamma, const real_t p_rotation,
+		const Ref<Image> &p_brush_image, const Color &p_color, const Vector2 &p_slope_range,
+		const bool p_texture_filter, const int p_regions_added_removed) {
+	Terrain3DData *data = _terrain->get_data();
+	if (!data || !data->is_gpu_workflow_ready()) {
+		return false;
+	}
+	if (_tool != COLOR) {
+		return false;
+	}
+	if (_operation != ADD && _operation != SUBTRACT) {
+		return false;
+	}
+	if (p_texture_filter) {
+		return false;
+	}
+	if (p_slope_range.x > 0.01f || p_slope_range.y < 89.99f) {
+		return false;
+	}
+	if (p_brush_image.is_null()) {
+		return false;
+	}
+	Terrain3DGpuBrushRequest request;
+	request.map_type = TYPE_COLOR;
+	request.center_world = p_global_position;
+	request.radius_world = p_brush_size * 0.5f;
+	request.strength = CLAMP(p_strength, 0.f, 1.f);
+	request.gamma = Math::max(p_gamma, 0.01f);
+	request.rotation = p_rotation;
+	request.color = p_color;
+	request.color_mode = _operation == SUBTRACT ? Terrain3DGpuColorMode::LERP_TO_WHITE : Terrain3DGpuColorMode::LERP_TO_COLOR;
+	request.mask = p_brush_image;
+	request.vertex_spacing = data->get_vertex_spacing();
+	request.region_size = data->get_region_size_value();
+	real_t radius = request.radius_world;
+	Vector2 brush_center = Vector2(p_global_position.x, p_global_position.z);
+	Vector2 min_point = brush_center - Vector2(radius, radius);
+	Vector2 max_point = brush_center + Vector2(radius, radius);
+	Vector2i loc_min = data->get_region_location(Vector3(min_point.x, 0.f, min_point.y));
+	Vector2i loc_max = data->get_region_location(Vector3(max_point.x, 0.f, max_point.y));
+	for (int y = loc_min.y - 1; y <= loc_max.y + 1; y++) {
+		for (int x = loc_min.x - 1; x <= loc_max.x + 1; x++) {
+			Vector2i region_loc(x, y);
+			Ref<Terrain3DRegion> region = _operate_region(region_loc);
+			if (region.is_null()) {
+				continue;
+			}
+			Terrain3DGpuBrushRegion job;
+			job.location = region_loc;
+			job.region = region;
+			request.regions.push_back(job);
+			backup_region(region);
+		}
+	}
+	if (request.regions.empty()) {
+		return false;
+	}
+	bool painted = data->apply_gpu_color_brush(request);
+	if (!painted) {
+		return false;
+	}
+	for (const Terrain3DGpuBrushRegion &region_info : request.regions) {
+		if (region_info.region.is_valid()) {
+			region_info.region->get_color_map()->generate_mipmaps();
+		}
+	}
+	if (_added_removed_locations.size() == p_regions_added_removed) {
+		data->update_maps(TYPE_COLOR, false, false);
+	} else {
+		data->update_maps(TYPE_COLOR, true, true);
+	}
+	data->add_edited_area(p_edited_area);
+	return true;
 }
 
 void Terrain3DEditor::_store_undo() {

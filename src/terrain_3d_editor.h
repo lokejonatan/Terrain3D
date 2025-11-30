@@ -7,6 +7,7 @@
 #include <godot_cpp/classes/image_texture.hpp>
 
 #include "terrain_3d.h"
+#include "terrain_3d_gpu.h"
 #include "terrain_3d_region.h"
 
 class Terrain3DEditor : public Object {
@@ -96,6 +97,10 @@ private:
 	bool _is_in_bounds(const Point2i &p_pixel, const Point2i &p_size) const;
 	Vector2 _get_uv_position(const Vector3 &p_global_position, const int p_region_size, const real_t p_vertex_spacing) const;
 	Vector2 _get_rotated_uv(const Vector2 &p_uv, const real_t p_angle) const;
+	bool _try_gpu_color_brush(const Vector3 &p_global_position, const AABB &p_edited_area, const real_t p_brush_size,
+			const real_t p_strength, const real_t p_gamma, const real_t p_rotation, const Ref<Image> &p_brush_image,
+			const Color &p_color, const Vector2 &p_slope_range, const bool p_texture_filter,
+			const int p_regions_added_removed);
 	void _store_undo();
 	void _apply_undo(const Dictionary &p_data);
 	real_t _average(const AverageMode p_mode, const Vector3 &p_global_position, const real_t p_base, const real_t p_nan_val = 0.f, bool p_alt = false) const;

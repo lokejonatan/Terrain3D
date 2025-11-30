@@ -6,6 +6,7 @@
 #include "constants.h"
 #include "generated_texture.h"
 #include "terrain_3d.h"
+#include "terrain_3d_gpu.h"
 #include "terrain_3d_region.h"
 
 class Terrain3D;
@@ -32,6 +33,8 @@ private:
 	int _region_size = 0; // Set by Terrain3D::set_region_size
 	Vector2i _region_sizev = V2I(_region_size);
 	real_t _vertex_spacing = 1.f; // Set by Terrain3D::set_vertex_spacing
+	bool _gpu_workflow_enabled = false;
+	Terrain3DGpuWorkflow *_gpu_workflow = nullptr;
 
 	AABB _edited_area;
 	Vector2 _master_height_range = V2_ZERO;
@@ -86,11 +89,17 @@ public:
 	// Regions
 
 	int get_region_count() const { return _region_locations.size(); }
+	void set_gpu_workflow_enabled(const bool p_enabled);
+	bool is_gpu_workflow_enabled() const { return _gpu_workflow_enabled; }
+	bool is_gpu_workflow_ready() const;
+	bool apply_gpu_color_brush(const Terrain3DGpuBrushRequest &p_request);
 	void set_region_locations(const TypedArray<Vector2i> &p_locations);
 	TypedArray<Vector2i> get_region_locations() const { return _region_locations; }
 	TypedArray<Terrain3DRegion> get_regions_active(const bool p_copy = false, const bool p_deep = false) const;
 	Dictionary get_regions_all() const { return _regions; }
 	PackedInt32Array get_region_map() const { return _region_map; }
+	real_t get_vertex_spacing() const { return _vertex_spacing; }
+	int get_region_size_value() const { return _region_size; }
 	static int get_region_map_index(const Vector2i &p_region_loc);
 
 	void do_for_regions(const Rect2i &p_area, const Callable &p_callback);

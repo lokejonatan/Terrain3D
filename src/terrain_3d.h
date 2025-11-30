@@ -85,6 +85,7 @@ private:
 	GeometryInstance3D::GIMode _gi_mode = GeometryInstance3D::GI_MODE_STATIC;
 	real_t _cull_margin = 0.0f;
 	bool _free_editor_textures = true;
+	bool _use_gpu_workflow = false;
 
 	// Mouse cursor
 	SubViewport *_mouse_vp = nullptr;
@@ -198,6 +199,8 @@ public:
 	// Rendering
 	void set_render_layers(const uint32_t p_layers);
 	uint32_t get_render_layers() const { return _render_layers; };
+	void set_use_gpu_workflow(const bool p_enabled);
+	bool get_use_gpu_workflow() const { return _use_gpu_workflow; }
 	void set_mouse_layer(const uint32_t p_layer);
 	uint32_t get_mouse_layer() const { return _mouse_layer; };
 	void set_cast_shadows(const RenderingServer::ShadowCastingSetting p_cast_shadows);

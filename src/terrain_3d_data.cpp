@@ -6,6 +6,7 @@
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
+#include <godot_cpp/core/memory.hpp>
 
 #include "logger.h"
 #include "terrain_3d_data.h"
@@ -16,6 +17,12 @@
 
 void Terrain3DData::_clear() {
 	LOG(INFO, "Clearing data");
+	if (_gpu_workflow) {
+		_gpu_workflow->shutdown();
+		godot::memdelete(_gpu_workflow);
+		_gpu_workflow = nullptr;
+	}
+	_gpu_workflow_enabled = false;
 	_region_map_dirty = true;
 	_region_map.clear();
 	_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
@@ -62,6 +69,32 @@ void Terrain3DData::initialize(Terrain3D *p_terrain) {
 	}
 	_region_size = _terrain->get_region_size();
 	_region_sizev = V2I(_region_size);
+	if (_gpu_workflow_enabled) {
+		set_gpu_workflow_enabled(true);
+	}
+}
+
+void Terrain3DData::set_gpu_workflow_enabled(const bool p_enabled) {
+	_gpu_workflow_enabled = p_enabled;
+	if (_gpu_workflow_enabled) {
+		if (!_gpu_workflow) {
+			_gpu_workflow = memnew(Terrain3DGpuWorkflow);
+		}
+		_gpu_workflow->initialize(this);
+	} else if (_gpu_workflow) {
+		_gpu_workflow->shutdown();
+	}
+}
+
+bool Terrain3DData::is_gpu_workflow_ready() const {
+	return _gpu_workflow_enabled && _gpu_workflow && _gpu_workflow->is_ready();
+}
+
+bool Terrain3DData::apply_gpu_color_brush(const Terrain3DGpuBrushRequest &p_request) {
+	if (!is_gpu_workflow_ready()) {
+		return false;
+	}
+	return _gpu_workflow->apply_color_brush(p_request);
 }
 
 void Terrain3DData::set_region_locations(const TypedArray<Vector2i> &p_locations) {
@@ -292,6 +325,9 @@ void Terrain3DData::remove_region(const Ref<Terrain3DRegion> &p_region, const bo
 	p_region->set_deleted(true);
 	_region_locations.remove_at(region_id);
 	_region_map_dirty = true;
+	if (_gpu_workflow) {
+		_gpu_workflow->remove_region(region_loc);
+	}
 	LOG(DEBUG, "Removing from region_locations, new size: ", _region_locations.size());
 	if (p_update) {
 		LOG(DEBUG, "Updating generated maps");

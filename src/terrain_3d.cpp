@@ -84,6 +84,9 @@ void Terrain3D::_initialize() {
 	if (!_initialized && _is_inside_world && is_inside_tree()) {
 		LOG(INFO, "Initializing main subsystems");
 		_data->initialize(this);
+		if (_use_gpu_workflow) {
+			_data->set_gpu_workflow_enabled(true);
+		}
 		_material->initialize(this);
 		_assets->initialize(this);
 		_collision->initialize(this);
@@ -701,6 +704,13 @@ void Terrain3D::set_tessellation_level(const int p_level) {
 	notify_property_list_changed();
 }
 
+void Terrain3D::set_use_gpu_workflow(const bool p_enabled) {
+	_use_gpu_workflow = p_enabled;
+	if (_data) {
+		_data->set_gpu_workflow_enabled(p_enabled);
+	}
+}
+
 void Terrain3D::set_render_layers(const uint32_t p_layers) {
 	SET_IF_DIFF(_render_layers, p_layers);
 	LOG(INFO, "Setting terrain render layers to: ", p_layers);
@@ -1236,6 +1246,8 @@ void Terrain3D::_bind_methods() {
 	// Rendering
 	ClassDB::bind_method(D_METHOD("set_render_layers", "layers"), &Terrain3D::set_render_layers);
 	ClassDB::bind_method(D_METHOD("get_render_layers"), &Terrain3D::get_render_layers);
+	ClassDB::bind_method(D_METHOD("set_use_gpu_workflow", "enabled"), &Terrain3D::set_use_gpu_workflow);
+	ClassDB::bind_method(D_METHOD("get_use_gpu_workflow"), &Terrain3D::get_use_gpu_workflow);
 	ClassDB::bind_method(D_METHOD("set_mouse_layer", "layer"), &Terrain3D::set_mouse_layer);
 	ClassDB::bind_method(D_METHOD("get_mouse_layer"), &Terrain3D::get_mouse_layer);
 	ClassDB::bind_method(D_METHOD("set_cast_shadows", "shadow_casting_setting"), &Terrain3D::set_cast_shadows);
@@ -1348,6 +1360,7 @@ void Terrain3D::_bind_methods() {
 
 	ADD_GROUP("Rendering", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "render_layers", PROPERTY_HINT_LAYERS_3D_RENDER), "set_render_layers", "get_render_layers");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "use_gpu_workflow"), "set_use_gpu_workflow", "get_use_gpu_workflow");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "mouse_layer", PROPERTY_HINT_RANGE, "21, 32"), "set_mouse_layer", "get_mouse_layer");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "cast_shadows", PROPERTY_HINT_ENUM, "Off,On,Double-Sided,Shadows Only"), "set_cast_shadows", "get_cast_shadows");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "gi_mode", PROPERTY_HINT_ENUM, "Disabled,Static,Dynamic"), "set_gi_mode", "get_gi_mode");
