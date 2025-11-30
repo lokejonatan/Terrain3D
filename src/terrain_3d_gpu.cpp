@@ -12,6 +12,7 @@
 #include <godot_cpp/classes/rd_texture_view.hpp>
 #include <godot_cpp/classes/rd_uniform.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/core/error_macros.hpp>
 #include <godot_cpp/core/math.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/rect2i.hpp>
@@ -129,7 +130,7 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 		}
 	}
 
-	bool any_dispatched = false;
+	int dispatch_count = 0;
 	for (const Terrain3DGpuBrushRegion &region_info : p_request.regions) {
 		Terrain3DRegion *region_ptr = region_info.region.ptr();
 		if (!region_ptr) {
@@ -142,14 +143,19 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 		bool dispatched = _dispatch_color_brush(p_request, region_info, state, mask_texture, mask_size);
 		if (dispatched) {
 			_readback_color_region(region_info, state);
-			any_dispatched = true;
+			dispatch_count++;
 		}
 	}
 
 	if (mask_texture.is_valid() && mask_texture != _fallback_mask_texture) {
 		_rd->free_rid(mask_texture);
 	}
-	return any_dispatched;
+	if (dispatch_count == 0) {
+		LOG(INFO, "GPU workflow skipped request: no eligible regions or target bounds");
+		return false;
+	}
+	LOG(INFO, "GPU workflow dispatched ", dispatch_count, " region(s)");
+	return true;
 }
 
 void Terrain3DGpuWorkflow::remove_region(const Vector2i &p_region_loc) {
@@ -194,13 +200,19 @@ void Terrain3DGpuWorkflow::_ensure_fallback_mask() {
 	if (_fallback_mask_texture.is_valid() || !_rd) {
 		return;
 	}
-	Ref<Image> img;
-	img.instantiate();
-	img->create(1, 1, false, Image::FORMAT_RF);
-	img->set_pixel(0, 0, Color(1.f, 0.f, 0.f, 1.f));
-	Vector2i dummy_size;
-	_fallback_mask_texture = _create_mask_texture(img, dummy_size);
-	_fallback_mask_size = dummy_size == Vector2i() ? Vector2i(1, 1) : dummy_size;
+	Ref<Image> img = Image::create(1, 1, false, Image::FORMAT_RF);
+	if (img.is_null()) {
+		LOG(ERROR, "Failed to create fallback mask image");
+		return;
+	}
+	img->set_pixel(0, 0, Color(1.f, 1.f, 1.f, 1.f));
+	_fallback_mask_size = img->get_size();
+	_fallback_mask_texture = _create_texture_from_image(img, RenderingDevice::DATA_FORMAT_R32_SFLOAT,
+			RenderingDevice::TEXTURE_USAGE_STORAGE_BIT | RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT);
+	if (!_fallback_mask_texture.is_valid()) {
+		LOG(ERROR, "Failed to create fallback mask texture");
+		_fallback_mask_size = V2I(1);
+	}
 }
 
 Terrain3DGpuWorkflow::RegionGpuState &Terrain3DGpuWorkflow::_get_or_create_region_state(const Vector2i &p_region_loc, Terrain3DRegion *p_region) {
@@ -277,7 +289,11 @@ RID Terrain3DGpuWorkflow::_create_texture_from_image(const Ref<Image> &p_image, 
 
 	TypedArray<PackedByteArray> data;
 	data.push_back(p_image->get_data());
-	return _rd->texture_create(fmt, view, data);
+	RID texture = _rd->texture_create(fmt, view, data);
+	if (!texture.is_valid()) {
+		LOG(ERROR, "RenderingDevice failed to create texture for GPU workflow upload");
+	}
+	return texture;
 }
 
 RID Terrain3DGpuWorkflow::_create_mask_texture(const Ref<Image> &p_mask, Vector2i &r_size) {

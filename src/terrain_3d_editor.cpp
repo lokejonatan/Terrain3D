@@ -601,21 +601,27 @@ bool Terrain3DEditor::_try_gpu_color_brush(const Vector3 &p_global_position, con
 	Terrain3DData *data = _terrain->get_data();
 	(void)p_regions_added_removed;
 	if (!data || !data->is_gpu_workflow_ready()) {
+		LOG(INFO, "GPU color brush skipped: workflow not ready");
 		return false;
 	}
 	if (_tool != COLOR) {
+		LOG(INFO, "GPU color brush skipped: tool is not COLOR");
 		return false;
 	}
 	if (_operation != ADD && _operation != SUBTRACT) {
+		LOG(INFO, "GPU color brush skipped: unsupported operation ", _operation);
 		return false;
 	}
 	if (p_texture_filter) {
+		LOG(INFO, "GPU color brush skipped: texture filter active");
 		return false;
 	}
 	if (p_slope_range.x > 0.01f || p_slope_range.y < 89.99f) {
+		LOG(INFO, "GPU color brush skipped: slope filter active");
 		return false;
 	}
 	if (p_brush_image.is_null()) {
+		LOG(INFO, "GPU color brush skipped: brush image missing");
 		return false;
 	}
 	Terrain3DGpuBrushRequest request;
@@ -651,12 +657,15 @@ bool Terrain3DEditor::_try_gpu_color_brush(const Vector3 &p_global_position, con
 		}
 	}
 	if (request.regions.empty()) {
+		LOG(INFO, "GPU color brush skipped: no regions affected");
 		return false;
 	}
 	bool painted = data->apply_gpu_color_brush(request);
 	if (!painted) {
+		LOG(INFO, "GPU color brush skipped: GPU workflow refused request");
 		return false;
 	}
+	LOG(INFO, "GPU color brush applied via compute shader (regions=", int(request.regions.size()), ", radius=", request.radius_world, ")");
 	data->update_maps(TYPE_COLOR, true, true);
 	data->add_edited_area(p_edited_area);
 	return true;
