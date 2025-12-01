@@ -82,10 +82,6 @@ void main() {
 	}
 
 	vec2 center_offset = (vec2(pixel) + vec2(0.5)) - params.brush_center;
-	float dist = length(center_offset) * params.inv_radius;
-	if (dist > 1.0) {
-		return;
-	}
 
 	vec2 normalized = rotate_uv(center_offset / (params.radius * 2.0)) + vec2(0.5);
 	float mask = pow(max(sample_mask(normalized), 0.0), params.gamma);
