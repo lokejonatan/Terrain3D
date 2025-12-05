@@ -778,15 +778,62 @@ void Terrain3DGpuWorkflow::_finalize_brush_readback(const PendingBrush &p_brush)
 	if (!_data) {
 		return;
 	}
+	bool visuals_synced = false;
+	bool gpu_blit_failed = false;
+	if (_rd) {
+		for (const Terrain3DGpuBrushRegion &region_info : p_brush.regions) {
+			auto state_it = _region_gpu_states.find(region_info.location);
+			if (state_it == _region_gpu_states.end()) {
+				continue;
+			}
+			bool synced = _upload_region_to_material(p_brush.map_type, region_info, state_it->second);
+			visuals_synced = visuals_synced || synced;
+			gpu_blit_failed = gpu_blit_failed || !synced;
+		}
+	}
+	if (visuals_synced) {
+		_data->_notify_gpu_maps_synced(p_brush.map_type);
+	}
+	if (gpu_blit_failed || !visuals_synced) {
+		switch (p_brush.map_type) {
+			case TYPE_COLOR:
+				_data->update_maps(TYPE_COLOR, true, p_brush.generate_color_mipmaps);
+				break;
+			case TYPE_HEIGHT:
+				_data->update_maps(TYPE_HEIGHT, true, false);
+				break;
+			default:
+				break;
+		}
+	}
 	switch (p_brush.map_type) {
 		case TYPE_COLOR:
-			_data->update_maps(TYPE_COLOR, true, p_brush.generate_color_mipmaps);
 			break;
 		case TYPE_HEIGHT:
-			_data->update_maps(TYPE_HEIGHT, true, false);
 			_data->notify_gpu_height_brush_complete(p_brush.edited_area, p_brush.update_instancer, p_brush.update_collision);
 			break;
 		default:
 			break;
 	}
+}
+
+bool Terrain3DGpuWorkflow::_upload_region_to_material(MapType p_map_type, const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state) {
+	if (!_data || !_rd) {
+		return false;
+	}
+	RID src_texture;
+	switch (p_map_type) {
+		case TYPE_COLOR:
+			src_texture = p_state.color_texture;
+			break;
+		case TYPE_HEIGHT:
+			src_texture = p_state.height_texture;
+			break;
+		default:
+			return false;
+	}
+	if (!src_texture.is_valid()) {
+		return false;
+	}
+	return _data->_blit_gpu_region_texture(p_map_type, p_region_info.location, p_state.size, _rd, src_texture);
 }

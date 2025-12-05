@@ -121,6 +121,7 @@ private:
 		const RegionGpuState &p_state, const RID &p_mask_texture, const Vector2i &p_mask_size);
 	void _enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps);
 	void _finalize_brush_readback(const PendingBrush &p_brush);
+	bool _upload_region_to_material(MapType p_map_type, const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state);
 };
 
 #endif // TERRAIN3D_GPU_WORKFLOW_H
