@@ -9,7 +9,9 @@
 #include <godot_cpp/core/memory.hpp>
 
 #include "logger.h"
+#include "terrain_3d_collision.h"
 #include "terrain_3d_data.h"
+#include "terrain_3d_instancer.h"
 
 ///////////////////////////
 // Private Functions
@@ -22,6 +24,7 @@ void Terrain3DData::_clear() {
 		godot::memdelete(_gpu_workflow);
 		_gpu_workflow = nullptr;
 	}
+	_gpu_readback_flush_scheduled = false;
 	_gpu_workflow_enabled = false;
 	_region_map_dirty = true;
 	_region_map.clear();
@@ -111,6 +114,46 @@ bool Terrain3DData::apply_gpu_height_brush(const Terrain3DGpuBrushRequest &p_req
 		return false;
 	}
 	return _gpu_workflow->apply_height_brush(p_request);
+}
+
+void Terrain3DData::request_gpu_readback_flush() {
+	if (!_gpu_workflow_enabled || !_gpu_workflow) {
+		return;
+	}
+	if (_gpu_readback_flush_scheduled) {
+		return;
+	}
+	_gpu_readback_flush_scheduled = true;
+	call_deferred("_process_gpu_readback_flush");
+}
+
+void Terrain3DData::_process_gpu_readback_flush() {
+	_gpu_readback_flush_scheduled = false;
+	if (!_gpu_workflow_enabled || !_gpu_workflow) {
+		return;
+	}
+	_gpu_workflow->process_pending_readbacks(_gpu_readbacks_per_flush);
+	if (_gpu_workflow->has_pending_readbacks()) {
+		request_gpu_readback_flush();
+	}
+}
+
+void Terrain3DData::notify_gpu_height_brush_complete(const AABB &p_area, bool p_update_instancer, bool p_update_collision) {
+	if (!_terrain) {
+		return;
+	}
+	if (p_update_instancer) {
+		Terrain3DInstancer *instancer = _terrain->get_instancer();
+		if (instancer) {
+			instancer->update_transforms(p_area);
+		}
+	}
+	if (p_update_collision && _terrain->get_collision_mode() == Terrain3DCollision::DYNAMIC_EDITOR) {
+		Terrain3DCollision *collision = _terrain->get_collision();
+		if (collision) {
+			collision->update(true);
+		}
+	}
 }
 
 void Terrain3DData::set_region_locations(const TypedArray<Vector2i> &p_locations) {
@@ -1242,6 +1285,8 @@ void Terrain3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_height_maps_rid"), &Terrain3DData::get_height_maps_rid);
 	ClassDB::bind_method(D_METHOD("get_control_maps_rid"), &Terrain3DData::get_control_maps_rid);
 	ClassDB::bind_method(D_METHOD("get_color_maps_rid"), &Terrain3DData::get_color_maps_rid);
+
+	ClassDB::bind_method(D_METHOD("_process_gpu_readback_flush"), &Terrain3DData::_process_gpu_readback_flush);
 
 	ClassDB::bind_method(D_METHOD("set_pixel", "map_type", "global_position", "pixel"), &Terrain3DData::set_pixel);
 	ClassDB::bind_method(D_METHOD("get_pixel", "map_type", "global_position"), &Terrain3DData::get_pixel);

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <utility>
 
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/rd_shader_source.hpp>
@@ -119,6 +120,7 @@ void Terrain3DGpuWorkflow::shutdown() {
 		_free_region_state(entry.second);
 	}
 	_region_gpu_states.clear();
+	_pending_brushes.clear();
 	if (_rd) {
 		if (_color_pipeline.is_valid()) {
 			_rd->free_rid(_color_pipeline);
@@ -166,6 +168,8 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 	}
 
 	int dispatch_count = 0;
+	std::vector<Terrain3DGpuBrushRegion> processed_regions;
+	processed_regions.reserve(p_request.regions.size());
 	for (const Terrain3DGpuBrushRegion &region_info : p_request.regions) {
 		Terrain3DRegion *region_ptr = region_info.region.ptr();
 		if (!region_ptr) {
@@ -177,7 +181,7 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 		}
 		bool dispatched = _dispatch_color_brush(p_request, region_info, state, mask_texture, mask_size);
 		if (dispatched) {
-			_readback_color_region(region_info, state);
+			processed_regions.push_back(region_info);
 			dispatch_count++;
 		}
 	}
@@ -189,6 +193,9 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 		LOG(INFO, "GPU workflow skipped request: no eligible regions or target bounds");
 		return false;
 	}
+	Terrain3DGpuBrushRequest queued_request = p_request;
+	queued_request.regions = std::move(processed_regions);
+	_enqueue_readback_brush(queued_request, true);
 	LOG(INFO, "GPU workflow dispatched ", dispatch_count, " region(s)");
 	return true;
 }
@@ -213,6 +220,8 @@ bool Terrain3DGpuWorkflow::apply_height_brush(const Terrain3DGpuBrushRequest &p_
 		}
 	}
 	int dispatch_count = 0;
+	std::vector<Terrain3DGpuBrushRegion> processed_regions;
+	processed_regions.reserve(p_request.regions.size());
 	for (const Terrain3DGpuBrushRegion &region_info : p_request.regions) {
 		Terrain3DRegion *region_ptr = region_info.region.ptr();
 		if (!region_ptr) {
@@ -224,7 +233,7 @@ bool Terrain3DGpuWorkflow::apply_height_brush(const Terrain3DGpuBrushRequest &p_
 		}
 		bool dispatched = _dispatch_height_brush(p_request, region_info, state, mask_texture, mask_size);
 		if (dispatched) {
-			_readback_height_region(region_info, state);
+			processed_regions.push_back(region_info);
 			dispatch_count++;
 		}
 	}
@@ -235,6 +244,9 @@ bool Terrain3DGpuWorkflow::apply_height_brush(const Terrain3DGpuBrushRequest &p_
 		LOG(INFO, "GPU workflow skipped height request: no eligible regions or target bounds");
 		return false;
 	}
+	Terrain3DGpuBrushRequest queued_request = p_request;
+	queued_request.regions = std::move(processed_regions);
+	_enqueue_readback_brush(queued_request, false);
 	LOG(INFO, "GPU workflow dispatched height brush to ", dispatch_count, " region(s)");
 	return true;
 }
@@ -708,4 +720,73 @@ bool Terrain3DGpuWorkflow::_dispatch_height_brush(const Terrain3DGpuBrushRequest
 	_rd->compute_list_end();
 	_rd->free_rid(uniform_set);
 	return true;
+}
+
+void Terrain3DGpuWorkflow::process_pending_readbacks(int p_max_brushes) {
+	if (p_max_brushes == 0) {
+		return;
+	}
+	if (p_max_brushes < 0) {
+		p_max_brushes = int(_pending_brushes.size());
+	}
+	int processed = 0;
+	while (processed < p_max_brushes && !_pending_brushes.empty()) {
+		PendingBrush brush = std::move(_pending_brushes.front());
+		_pending_brushes.pop_front();
+		for (const Terrain3DGpuBrushRegion &region_info : brush.regions) {
+			auto state_it = _region_gpu_states.find(region_info.location);
+			if (state_it == _region_gpu_states.end()) {
+				continue;
+			}
+			switch (brush.map_type) {
+				case TYPE_COLOR:
+					_readback_color_region(region_info, state_it->second);
+					break;
+				case TYPE_HEIGHT:
+					_readback_height_region(region_info, state_it->second);
+					break;
+				default:
+					break;
+			}
+		}
+		_finalize_brush_readback(brush);
+		processed++;
+	}
+	if (_data && !_pending_brushes.empty()) {
+		_data->request_gpu_readback_flush();
+	}
+}
+
+void Terrain3DGpuWorkflow::_enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps) {
+	if (p_request.regions.empty()) {
+		return;
+	}
+	PendingBrush brush;
+	brush.map_type = p_request.map_type;
+	brush.regions = p_request.regions;
+	brush.edited_area = p_request.edited_area;
+	brush.update_instancer = p_request.update_instancer;
+	brush.update_collision = p_request.update_collision;
+	brush.generate_color_mipmaps = p_generate_color_mipmaps;
+	_pending_brushes.push_back(std::move(brush));
+	if (_data) {
+		_data->request_gpu_readback_flush();
+	}
+}
+
+void Terrain3DGpuWorkflow::_finalize_brush_readback(const PendingBrush &p_brush) {
+	if (!_data) {
+		return;
+	}
+	switch (p_brush.map_type) {
+		case TYPE_COLOR:
+			_data->update_maps(TYPE_COLOR, true, p_brush.generate_color_mipmaps);
+			break;
+		case TYPE_HEIGHT:
+			_data->update_maps(TYPE_HEIGHT, true, false);
+			_data->notify_gpu_height_brush_complete(p_brush.edited_area, p_brush.update_instancer, p_brush.update_collision);
+			break;
+		default:
+			break;
+	}
 }

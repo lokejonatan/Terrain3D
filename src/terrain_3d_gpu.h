@@ -6,12 +6,14 @@
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/ref.hpp>
+#include <godot_cpp/variant/aabb.hpp>
 #include <godot_cpp/variant/color.hpp>
 #include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/vector2.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
+#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -52,6 +54,9 @@ struct Terrain3DGpuBrushRequest {
 	Ref<Image> mask;
 	real_t vertex_spacing = 1.f;
 	int region_size = 0;
+	AABB edited_area;
+	bool update_instancer = false;
+	bool update_collision = false;
 	std::vector<Terrain3DGpuBrushRegion> regions;
 };
 
@@ -69,12 +74,23 @@ public:
 	bool apply_height_brush(const Terrain3DGpuBrushRequest &p_request);
 
 	void remove_region(const Vector2i &p_region_loc);
+	void process_pending_readbacks(int p_max_brushes = 1);
+	bool has_pending_readbacks() const { return !_pending_brushes.empty(); }
 
 private:
 	struct RegionGpuState {
 		RID color_texture;
 		RID height_texture;
 		Vector2i size = V2I_ZERO;
+	};
+
+	struct PendingBrush {
+		MapType map_type = TYPE_MAX;
+		std::vector<Terrain3DGpuBrushRegion> regions;
+		AABB edited_area;
+		bool update_instancer = false;
+		bool update_collision = false;
+		bool generate_color_mipmaps = false;
 	};
 
 	Terrain3DData *_data = nullptr;
@@ -87,6 +103,7 @@ private:
 	RID _fallback_mask_texture;
 	Vector2i _fallback_mask_size = V2I(1);
 	std::unordered_map<Vector2i, RegionGpuState, Vector2iHash> _region_gpu_states;
+	std::deque<PendingBrush> _pending_brushes;
 
 	bool _ensure_color_pipeline();
 	bool _ensure_height_pipeline();
@@ -102,6 +119,8 @@ private:
 		const RegionGpuState &p_state, const RID &p_mask_texture, const Vector2i &p_mask_size);
 	bool _dispatch_height_brush(const Terrain3DGpuBrushRequest &p_request, const Terrain3DGpuBrushRegion &p_region_info,
 		const RegionGpuState &p_state, const RID &p_mask_texture, const Vector2i &p_mask_size);
+	void _enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps);
+	void _finalize_brush_readback(const PendingBrush &p_brush);
 };
 
 #endif // TERRAIN3D_GPU_WORKFLOW_H

@@ -648,6 +648,7 @@ bool Terrain3DEditor::_try_gpu_color_brush(const Vector3 &p_global_position, con
 	request.mask = p_brush_image;
 	request.vertex_spacing = data->get_vertex_spacing();
 	request.region_size = data->get_region_size_value();
+	request.edited_area = p_edited_area;
 	real_t radius = request.radius_world;
 	Vector2 brush_center = Vector2(p_global_position.x, p_global_position.z);
 	Vector2 min_point = brush_center - Vector2(radius, radius);
@@ -678,7 +679,6 @@ bool Terrain3DEditor::_try_gpu_color_brush(const Vector3 &p_global_position, con
 		return false;
 	}
 	LOG(INFO, "GPU color brush applied via compute shader (regions=", int(request.regions.size()), ", radius=", request.radius_world, ")");
-	data->update_maps(TYPE_COLOR, true, true);
 	data->add_edited_area(p_edited_area);
 	return true;
 }
@@ -721,6 +721,9 @@ bool Terrain3DEditor::_try_gpu_height_brush(const Vector3 &p_global_position, co
 	request.height_use_alt = p_modifier_alt && _tool != HEIGHT && !std::isnan(p_global_position.y);
 	request.target_height = p_target_height;
 	request.cursor_height = p_global_position.y;
+	request.edited_area = p_edited_area;
+	request.update_instancer = (_tool == HEIGHT || _tool == SCULPT);
+	request.update_collision = (_terrain->get_collision_mode() == Terrain3DCollision::DYNAMIC_EDITOR);
 	real_t radius = request.radius_world;
 	Vector2 brush_center = Vector2(p_global_position.x, p_global_position.z);
 	Vector2 min_point = brush_center - Vector2(radius, radius);
@@ -752,14 +755,7 @@ bool Terrain3DEditor::_try_gpu_height_brush(const Vector3 &p_global_position, co
 	}
 	LOG(INFO, "GPU height brush applied via compute shader (regions=",
 		int(request.regions.size()), ", radius=", request.radius_world, ")");
-	data->update_maps(TYPE_HEIGHT, true, false);
 	data->add_edited_area(p_edited_area);
-	if (_tool == HEIGHT || _tool == SCULPT) {
-		_terrain->get_instancer()->update_transforms(p_edited_area);
-	}
-	if (_terrain->get_collision_mode() == Terrain3DCollision::DYNAMIC_EDITOR) {
-		_terrain->get_collision()->update(true);
-	}
 	return true;
 }
 

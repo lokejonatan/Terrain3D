@@ -76,10 +76,13 @@ private:
 	GeneratedTexture _generated_height_maps;
 	GeneratedTexture _generated_control_maps;
 	GeneratedTexture _generated_color_maps;
+	bool _gpu_readback_flush_scheduled = false;
+	int _gpu_readbacks_per_flush = 1;
 
 	// Functions
 	void _clear();
 	void _copy_paste_dfr(const Terrain3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Terrain3DRegion *p_dst_region);
+	void _process_gpu_readback_flush();
 
 public:
 	Terrain3DData() {}
@@ -94,6 +97,8 @@ public:
 	bool is_gpu_workflow_ready() const;
 	bool apply_gpu_color_brush(const Terrain3DGpuBrushRequest &p_request);
 	bool apply_gpu_height_brush(const Terrain3DGpuBrushRequest &p_request);
+	void request_gpu_readback_flush();
+	void notify_gpu_height_brush_complete(const AABB &p_area, bool p_update_instancer, bool p_update_collision);
 	void set_region_locations(const TypedArray<Vector2i> &p_locations);
 	TypedArray<Vector2i> get_region_locations() const { return _region_locations; }
 	TypedArray<Terrain3DRegion> get_regions_active(const bool p_copy = false, const bool p_deep = false) const;
