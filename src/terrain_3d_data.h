@@ -9,12 +9,16 @@
 #include "terrain_3d_gpu.h"
 #include "terrain_3d_region.h"
 
+#include <godot_cpp/classes/rendering_device.hpp>
+#include <godot_cpp/classes/texture2d_array_rd.hpp>
+
 class Terrain3D;
 
 class Terrain3DData : public Object {
 	GDCLASS(Terrain3DData, Object);
 	CLASS_NAME();
 	friend Terrain3D;
+	friend class Terrain3DGpuWorkflow;
 
 public: // Constants
 	static inline const real_t CURRENT_VERSION = 0.93f;
@@ -76,13 +80,31 @@ private:
 	GeneratedTexture _generated_height_maps;
 	GeneratedTexture _generated_control_maps;
 	GeneratedTexture _generated_color_maps;
+	Ref<Texture2DArrayRD> _rd_height_maps;
+	Ref<Texture2DArrayRD> _rd_control_maps;
+	Ref<Texture2DArrayRD> _rd_color_maps;
+	RID _rd_height_texture;
+	RID _rd_control_texture;
+	RID _rd_color_texture;
 	bool _gpu_readback_flush_scheduled = false;
-	int _gpu_readbacks_per_flush = 1;
+	int _gpu_readbacks_per_flush = -1; // -1 processes the full queue for realtime feedback
 
 	// Functions
 	void _clear();
 	void _copy_paste_dfr(const Terrain3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Terrain3DRegion *p_dst_region);
 	void _process_gpu_readback_flush();
+	void _clear_generated_texture(MapType p_map_type);
+	bool _ensure_texture_arrays(MapType p_map_type);
+	RID _get_generated_texture_rid(MapType p_map_type) const;
+	RID _get_rd_texture_rid(MapType p_map_type) const;
+	bool _blit_gpu_region_texture(MapType p_map_type, const Vector2i &p_region_loc, const Vector2i &p_region_size,
+		RenderingDevice *p_rd, const RID &p_src_texture);
+	bool _build_rd_texture_array(MapType p_map_type, const TypedArray<Image> &p_layers);
+	bool _update_rd_texture_layer(MapType p_map_type, const Ref<Image> &p_image, int p_layer);
+	void _clear_rd_texture_array(MapType p_map_type);
+	TypedArray<Image> _get_layered_images(MapType p_map_type) const;
+	RenderingDevice::DataFormat _get_rd_format(MapType p_map_type) const;
+	void _notify_gpu_maps_synced(MapType p_map_type);
 
 public:
 	Terrain3DData() {}
@@ -147,9 +169,9 @@ public:
 	TypedArray<Image> get_color_maps() const { return _color_maps; }
 	TypedArray<Image> get_maps(const MapType p_map_type) const;
 	void update_maps(const MapType p_map_type = TYPE_MAX, const bool p_all_regions = true, const bool p_generate_mipmaps = false);
-	RID get_height_maps_rid() const { return _generated_height_maps.get_rid(); }
-	RID get_control_maps_rid() const { return _generated_control_maps.get_rid(); }
-	RID get_color_maps_rid() const { return _generated_color_maps.get_rid(); }
+	RID get_height_maps_rid() const { return _rd_height_maps.is_valid() ? _rd_height_maps->get_rid() : _generated_height_maps.get_rid(); }
+	RID get_control_maps_rid() const { return _rd_control_maps.is_valid() ? _rd_control_maps->get_rid() : _generated_control_maps.get_rid(); }
+	RID get_color_maps_rid() const { return _rd_color_maps.is_valid() ? _rd_color_maps->get_rid() : _generated_color_maps.get_rid(); }
 
 	void set_pixel(const MapType p_map_type, const Vector3 &p_global_position, const Color &p_pixel);
 	Color get_pixel(const MapType p_map_type, const Vector3 &p_global_position) const;

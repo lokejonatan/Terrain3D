@@ -5,8 +5,15 @@
 #include <godot_cpp/classes/editor_interface.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/rd_texture_format.hpp>
+#include <godot_cpp/classes/rd_texture_view.hpp>
+#include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
+#include <godot_cpp/classes/texture2d_array_rd.hpp>
 #include <godot_cpp/core/memory.hpp>
+#include <godot_cpp/variant/vector3.hpp>
+
+using namespace godot;
 
 #include "logger.h"
 #include "terrain_3d_collision.h"
@@ -16,6 +23,204 @@
 ///////////////////////////
 // Private Functions
 ///////////////////////////
+
+namespace {
+
+static Ref<Image> _ensure_image_for_upload(const Ref<Image> &p_image, const Vector2i &p_size, const MapType p_type) {
+	Ref<Image> img = p_image;
+	if (img.is_null()) {
+		img = Image::create_empty(p_size.x, p_size.y, false, FORMAT[p_type]);
+		img->fill(COLOR[p_type]);
+		return img;
+	}
+	if (img->get_size() != p_size) {
+		UtilityFunctions::push_error("Terrain3DData::_ensure_image_for_upload size mismatch. Expected ", p_size,
+			", got ", img->get_size());
+		return Ref<Image>();
+	}
+	return img;
+}
+
+} // namespace
+
+void Terrain3DData::_clear_generated_texture(MapType p_map_type) {
+	switch (p_map_type) {
+		case TYPE_HEIGHT:
+			_generated_height_maps.clear();
+			_clear_rd_texture_array(TYPE_HEIGHT);
+			break;
+		case TYPE_CONTROL:
+			_generated_control_maps.clear();
+			_clear_rd_texture_array(TYPE_CONTROL);
+			break;
+		case TYPE_COLOR:
+			_generated_color_maps.clear();
+			_clear_rd_texture_array(TYPE_COLOR);
+			break;
+		default:
+			_generated_height_maps.clear();
+			_generated_control_maps.clear();
+			_generated_color_maps.clear();
+			_clear_rd_texture_array(TYPE_HEIGHT);
+			_clear_rd_texture_array(TYPE_CONTROL);
+			_clear_rd_texture_array(TYPE_COLOR);
+			break;
+	}
+}
+
+RenderingDevice::DataFormat Terrain3DData::_get_rd_format(MapType p_map_type) const {
+	switch (p_map_type) {
+		case TYPE_HEIGHT:
+		case TYPE_CONTROL:
+			return RenderingDevice::DATA_FORMAT_R32_SFLOAT;
+		case TYPE_COLOR:
+			return RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM;
+		default:
+			return RenderingDevice::DATA_FORMAT_MAX;
+	}
+}
+
+TypedArray<Image> Terrain3DData::_get_layered_images(MapType p_map_type) const {
+	switch (p_map_type) {
+		case TYPE_HEIGHT:
+			return _height_maps;
+		case TYPE_CONTROL:
+			return _control_maps;
+		case TYPE_COLOR:
+			return _color_maps;
+		default:
+			return TypedArray<Image>();
+	}
+}
+
+RID Terrain3DData::_get_rd_texture_rid(MapType p_map_type) const {
+	switch (p_map_type) {
+		case TYPE_HEIGHT:
+			return _rd_height_texture;
+		case TYPE_CONTROL:
+			return _rd_control_texture;
+		case TYPE_COLOR:
+			return _rd_color_texture;
+		default:
+			return RID();
+	}
+}
+
+void Terrain3DData::_clear_rd_texture_array(MapType p_map_type) {
+	RenderingDevice *rd = RS->get_rendering_device();
+	auto clear_slot = [&](Ref<Texture2DArrayRD> &p_texture, RID &p_rid) {
+		if (p_texture.is_valid()) {
+			p_texture->set_texture_rd_rid(RID());
+			p_texture.unref();
+		}
+		if (rd && p_rid.is_valid()) {
+			rd->free_rid(p_rid);
+		}
+		p_rid = RID();
+	};
+	switch (p_map_type) {
+		case TYPE_HEIGHT:
+			clear_slot(_rd_height_maps, _rd_height_texture);
+			break;
+		case TYPE_CONTROL:
+			clear_slot(_rd_control_maps, _rd_control_texture);
+			break;
+		case TYPE_COLOR:
+			clear_slot(_rd_color_maps, _rd_color_texture);
+			break;
+		default:
+			clear_slot(_rd_height_maps, _rd_height_texture);
+			clear_slot(_rd_control_maps, _rd_control_texture);
+			clear_slot(_rd_color_maps, _rd_color_texture);
+			break;
+	}
+}
+
+bool Terrain3DData::_build_rd_texture_array(MapType p_map_type, const TypedArray<Image> &p_layers) {
+	RenderingDevice *rd = RS->get_rendering_device();
+	if (!rd || p_layers.is_empty()) {
+		return false;
+	}
+	Ref<Image> first = p_layers[0];
+	if (first.is_null() || first->is_empty()) {
+		return false;
+	}
+	Vector2i tex_size = first->get_size();
+	TypedArray<PackedByteArray> data;
+	data.resize(p_layers.size());
+	for (int i = 0; i < p_layers.size(); i++) {
+		Ref<Image> img = _ensure_image_for_upload(p_layers[i], tex_size, p_map_type);
+		if (img.is_null() || img->is_empty()) {
+			return false;
+		}
+		data[i] = img->get_data();
+	}
+	Ref<RDTextureFormat> format;
+	format.instantiate();
+	format->set_width(tex_size.x);
+	format->set_height(tex_size.y);
+	format->set_depth(1);
+	format->set_texture_type(RenderingDevice::TEXTURE_TYPE_2D_ARRAY);
+	format->set_format(_get_rd_format(p_map_type));
+	format->set_array_layers(p_layers.size());
+	format->set_mipmaps(1);
+	format->set_usage_bits(RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT |
+			RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT |
+			RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT |
+			RenderingDevice::TEXTURE_USAGE_CAN_UPDATE_BIT);
+	Ref<RDTextureView> view;
+	view.instantiate();
+	RID rd_texture = rd->texture_create(format, view, data);
+	if (!rd_texture.is_valid()) {
+		LOG(ERROR, "Failed to create RD texture array for map type ", TYPESTR[p_map_type]);
+		return false;
+	}
+	Ref<Texture2DArrayRD> tex;
+	tex.instantiate();
+	tex->set_texture_rd_rid(rd_texture);
+	switch (p_map_type) {
+		case TYPE_HEIGHT: {
+			_clear_rd_texture_array(TYPE_HEIGHT);
+			_rd_height_maps = tex;
+			_rd_height_texture = rd_texture;
+		} break;
+		case TYPE_CONTROL: {
+			_clear_rd_texture_array(TYPE_CONTROL);
+			_rd_control_maps = tex;
+			_rd_control_texture = rd_texture;
+		} break;
+		case TYPE_COLOR: {
+			_clear_rd_texture_array(TYPE_COLOR);
+			_rd_color_maps = tex;
+			_rd_color_texture = rd_texture;
+		} break;
+		default:
+			break;
+	}
+	return true;
+}
+
+bool Terrain3DData::_update_rd_texture_layer(MapType p_map_type, const Ref<Image> &p_image, int p_layer) {
+	RenderingDevice *rd = RS->get_rendering_device();
+	RID rd_texture = _get_rd_texture_rid(p_map_type);
+	if (!rd || !rd_texture.is_valid() || p_layer < 0) {
+		return false;
+	}
+	Ref<Image> img = p_image;
+	if (img.is_null() || img->is_empty()) {
+		return false;
+	}
+	PackedByteArray bytes = img->get_data();
+	if (bytes.is_empty()) {
+		return false;
+	}
+	Error err = rd->texture_update(rd_texture, uint32_t(p_layer), bytes);
+	if (err != OK) {
+		LOG(WARN, "Failed to update RD texture layer for ", TYPESTR[p_map_type], " layer ", p_layer, ", err=", err);
+		return false;
+	}
+	return true;
+}
 
 void Terrain3DData::_clear() {
 	LOG(INFO, "Clearing data");
@@ -32,9 +237,7 @@ void Terrain3DData::_clear() {
 	_regions.clear();
 	_region_locations.clear();
 	_master_height_range = V2_ZERO;
-	_generated_height_maps.clear();
-	_generated_control_maps.clear();
-	_generated_color_maps.clear();
+	_clear_generated_texture(TYPE_MAX);
 }
 
 // Structured to work with do_for_regions. Should be renamed when copy_paste is expanded
@@ -51,6 +254,89 @@ void Terrain3DData::_copy_paste_dfr(const Terrain3DRegion *p_src_region, const R
 		}
 	}
 	_terrain->get_instancer()->copy_paste_dfr(p_src_region, p_src_rect, p_dst_region);
+}
+
+bool Terrain3DData::_ensure_texture_arrays(MapType p_map_type) {
+	RID rid = _get_generated_texture_rid(p_map_type);
+	if (rid.is_valid()) {
+		return true;
+	}
+	update_maps(p_map_type, true, false);
+	rid = _get_generated_texture_rid(p_map_type);
+	return rid.is_valid();
+}
+
+RID Terrain3DData::_get_generated_texture_rid(MapType p_map_type) const {
+	switch (p_map_type) {
+		case TYPE_HEIGHT:
+			return _generated_height_maps.get_rid();
+		case TYPE_CONTROL:
+			return _generated_control_maps.get_rid();
+		case TYPE_COLOR:
+			return _generated_color_maps.get_rid();
+		default:
+			return RID();
+	}
+}
+
+bool Terrain3DData::_blit_gpu_region_texture(MapType p_map_type, const Vector2i &p_region_loc, const Vector2i &p_region_size,
+		RenderingDevice *p_rd, const RID &p_src_texture) {
+	if (!p_rd || !p_src_texture.is_valid()) {
+		return false;
+	}
+	if (!_ensure_texture_arrays(p_map_type)) {
+		return false;
+	}
+	RID dst_texture = _get_rd_texture_rid(p_map_type);
+	if (!dst_texture.is_valid()) {
+		TypedArray<Image> layers = _get_layered_images(p_map_type);
+		if (layers.is_empty() || !_build_rd_texture_array(p_map_type, layers)) {
+			return false;
+		}
+		dst_texture = _get_rd_texture_rid(p_map_type);
+		if (!dst_texture.is_valid()) {
+			return false;
+		}
+	}
+	if (!dst_texture.is_valid()) {
+		return false;
+	}
+	int region_id = get_region_id(p_region_loc);
+	if (region_id < 0) {
+		return false;
+	}
+	Vector3 size_vec(real_t(p_region_size.x), real_t(p_region_size.y), 1.f);
+	Vector3 zero(0.f, 0.f, 0.f);
+	Error err = p_rd->texture_copy(p_src_texture, dst_texture, zero, zero, size_vec, 0, 0, 0, region_id);
+	if (err != OK) {
+		LOG(ERROR, "Failed to blit GPU texture for region ", p_region_loc, ", err=", err);
+		return false;
+	}
+	return true;
+}
+
+void Terrain3DData::_notify_gpu_maps_synced(MapType p_map_type) {
+	switch (p_map_type) {
+		case TYPE_HEIGHT:
+			LOG(DEBUG, "Emitting height_maps_changed (GPU)");
+			emit_signal("height_maps_changed");
+			break;
+		case TYPE_CONTROL:
+			LOG(DEBUG, "Emitting control_maps_changed (GPU)");
+			emit_signal("control_maps_changed");
+			break;
+		case TYPE_COLOR:
+			LOG(DEBUG, "Emitting color_maps_changed (GPU)");
+			emit_signal("color_maps_changed");
+			break;
+		default:
+			break;
+	}
+	LOG(DEBUG, "Emitting maps_changed (GPU)");
+	emit_signal("maps_changed");
+	if (_terrain) {
+		_terrain->snap();
+	}
 }
 
 ///////////////////////////
@@ -124,7 +410,11 @@ void Terrain3DData::request_gpu_readback_flush() {
 		return;
 	}
 	_gpu_readback_flush_scheduled = true;
-	call_deferred("_process_gpu_readback_flush");
+	if (_gpu_readbacks_per_flush < 0) {
+		_process_gpu_readback_flush();
+	} else {
+		call_deferred("_process_gpu_readback_flush");
+	}
 }
 
 void Terrain3DData::_process_gpu_readback_flush() {
@@ -133,7 +423,7 @@ void Terrain3DData::_process_gpu_readback_flush() {
 		return;
 	}
 	_gpu_workflow->process_pending_readbacks(_gpu_readbacks_per_flush);
-	if (_gpu_workflow->has_pending_readbacks()) {
+	if (_gpu_readbacks_per_flush > 0 && _gpu_workflow->has_pending_readbacks()) {
 		request_gpu_readback_flush();
 	}
 }
@@ -554,18 +844,16 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		LOG(EXTREME, "Marking dirty maps of type: ", p_map_type);
 		switch (p_map_type) {
 			case TYPE_HEIGHT:
-				_generated_height_maps.clear();
+				_clear_generated_texture(TYPE_HEIGHT);
 				break;
 			case TYPE_CONTROL:
-				_generated_control_maps.clear();
+				_clear_generated_texture(TYPE_CONTROL);
 				break;
 			case TYPE_COLOR:
-				_generated_color_maps.clear();
+				_clear_generated_texture(TYPE_COLOR);
 				break;
 			default:
-				_generated_height_maps.clear();
-				_generated_control_maps.clear();
-				_generated_color_maps.clear();
+				_clear_generated_texture(TYPE_MAX);
 				_region_map_dirty = true;
 				break;
 		}
@@ -613,6 +901,7 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 			}
 		}
 		_generated_height_maps.create(_height_maps);
+		_build_rd_texture_array(TYPE_HEIGHT, _height_maps);
 		calc_height_range();
 		any_changed = true;
 		LOG(DEBUG, "Emitting height_maps_changed");
@@ -630,6 +919,7 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 			}
 		}
 		_generated_control_maps.create(_control_maps);
+		_build_rd_texture_array(TYPE_CONTROL, _control_maps);
 		any_changed = true;
 		LOG(DEBUG, "Emitting control_maps_changed");
 		emit_signal("control_maps_changed");
@@ -646,6 +936,7 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 			}
 		}
 		_generated_color_maps.create(_color_maps);
+		_build_rd_texture_array(TYPE_COLOR, _color_maps);
 		any_changed = true;
 		LOG(DEBUG, "Emitting color_maps_changed");
 		emit_signal("color_maps_changed");
@@ -661,16 +952,19 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 				switch (p_map_type) {
 					case TYPE_HEIGHT:
 						_generated_height_maps.update(region->get_height_map(), region_id);
+						_update_rd_texture_layer(TYPE_HEIGHT, region->get_height_map(), region_id);
 						LOG(DEBUG, "Emitting height_maps_changed");
 						emit_signal("height_maps_changed");
 						break;
 					case TYPE_CONTROL:
 						_generated_control_maps.update(region->get_control_map(), region_id);
+						_update_rd_texture_layer(TYPE_CONTROL, region->get_control_map(), region_id);
 						LOG(DEBUG, "Emitting control_maps_changed");
 						emit_signal("control_maps_changed");
 						break;
 					case TYPE_COLOR:
 						_generated_color_maps.update(region->get_color_map(), region_id);
+						_update_rd_texture_layer(TYPE_COLOR, region->get_color_map(), region_id);
 						LOG(DEBUG, "Emitting color_maps_changed");
 						emit_signal("color_maps_changed");
 						break;
@@ -678,6 +972,9 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 						_generated_height_maps.update(region->get_height_map(), region_id);
 						_generated_control_maps.update(region->get_control_map(), region_id);
 						_generated_color_maps.update(region->get_color_map(), region_id);
+						_update_rd_texture_layer(TYPE_HEIGHT, region->get_height_map(), region_id);
+						_update_rd_texture_layer(TYPE_CONTROL, region->get_control_map(), region_id);
+						_update_rd_texture_layer(TYPE_COLOR, region->get_color_map(), region_id);
 						LOG(DEBUG, "Emitting height_maps_changed");
 						emit_signal("height_maps_changed");
 						LOG(DEBUG, "Emitting control_maps_changed");
