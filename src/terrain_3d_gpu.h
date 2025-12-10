@@ -4,6 +4,7 @@
 #define TERRAIN3D_GPU_WORKFLOW_H
 
 #include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/object.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/variant/aabb.hpp>
@@ -60,7 +61,10 @@ struct Terrain3DGpuBrushRequest {
 	std::vector<Terrain3DGpuBrushRegion> regions;
 };
 
-class Terrain3DGpuWorkflow {
+class Terrain3DGpuWorkflow : public Object {
+	GDCLASS(Terrain3DGpuWorkflow, Object);
+	CLASS_NAME();
+
 public:
 	Terrain3DGpuWorkflow() = default;
 	~Terrain3DGpuWorkflow();
@@ -75,7 +79,11 @@ public:
 
 	void remove_region(const Vector2i &p_region_loc);
 	void process_pending_readbacks(int p_max_brushes = 1);
-	bool has_pending_readbacks() const { return !_pending_brushes.empty(); }
+	bool has_pending_readbacks() const { return !_pending_brushes.empty() || !_inflight_brushes.empty(); }
+	void flush_gpu_commands(); // Submit and sync GPU commands to trigger async readback callbacks
+
+protected:
+	static void _bind_methods();
 
 private:
 	struct RegionGpuState {
@@ -91,6 +99,8 @@ private:
 		bool update_instancer = false;
 		bool update_collision = false;
 		bool generate_color_mipmaps = false;
+		int64_t id = 0;
+		int pending_readbacks = 0;
 	};
 
 	Terrain3DData *_data = nullptr;
@@ -104,6 +114,11 @@ private:
 	Vector2i _fallback_mask_size = V2I(1);
 	std::unordered_map<Vector2i, RegionGpuState, Vector2iHash> _region_gpu_states;
 	std::deque<PendingBrush> _pending_brushes;
+	std::unordered_map<int64_t, PendingBrush> _inflight_brushes;
+	int64_t _next_brush_id = 1;
+	bool _async_readbacks_supported = true;
+	bool _async_test_completed = false;
+	bool _async_test_callback_fired = false;
 
 	bool _ensure_color_pipeline();
 	bool _ensure_height_pipeline();
@@ -113,8 +128,8 @@ private:
 		BitField<RenderingDevice::TextureUsageBits> p_usage);
 	RID _create_mask_texture(const Ref<Image> &p_mask, Vector2i &r_size);
 	void _free_region_state(RegionGpuState &p_state);
-	void _readback_color_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state);
-	void _readback_height_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state);
+	bool _readback_color_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state, int64_t p_brush_id);
+	bool _readback_height_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state, int64_t p_brush_id);
 	bool _dispatch_color_brush(const Terrain3DGpuBrushRequest &p_request, const Terrain3DGpuBrushRegion &p_region_info,
 		const RegionGpuState &p_state, const RID &p_mask_texture, const Vector2i &p_mask_size);
 	bool _dispatch_height_brush(const Terrain3DGpuBrushRequest &p_request, const Terrain3DGpuBrushRegion &p_region_info,
@@ -122,6 +137,14 @@ private:
 	void _enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps);
 	void _finalize_brush_readback(const PendingBrush &p_brush);
 	bool _upload_region_to_material(MapType p_map_type, const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state);
+	void _apply_readback_data(MapType p_map_type, const PackedByteArray &p_data, const Ref<Terrain3DRegion> &p_region, const Vector2i &p_size);
+	void _on_async_texture_readback(const RID &p_texture, uint32_t p_layer, const PackedByteArray &p_data,
+		Ref<Terrain3DRegion> p_region, Vector2i p_size, int p_map_type, int64_t p_brush_id);
+	void _handle_async_readback_complete(int64_t p_brush_id);
+
+	// Detect if async readback callbacks are actually supported by the rendering backend.
+	void _test_async_readback_support();
+	void _on_async_test_readback(const RID &p_texture, uint32_t p_layer, const PackedByteArray &p_data);
 };
 
 #endif // TERRAIN3D_GPU_WORKFLOW_H

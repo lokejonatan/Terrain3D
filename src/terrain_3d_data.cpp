@@ -423,6 +423,8 @@ void Terrain3DData::_process_gpu_readback_flush() {
 		return;
 	}
 	_gpu_workflow->process_pending_readbacks(_gpu_readbacks_per_flush);
+	// Flush GPU commands to trigger async readback callbacks.
+	_gpu_workflow->flush_gpu_commands();
 	if (_gpu_readbacks_per_flush > 0 && _gpu_workflow->has_pending_readbacks()) {
 		request_gpu_readback_flush();
 	}

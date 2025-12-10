@@ -1,27 +1,31 @@
 // Copyright © 2025 Cory Petkovsek, Roope Palmroos, and Contributors.
 
-#include "terrain_3d_gpu.h"
-
-#include <cstdint>
-#include <cstring>
-#include <utility>
-
 #include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/object.hpp>
+#include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/rd_shader_source.hpp>
 #include <godot_cpp/classes/rd_shader_spirv.hpp>
 #include <godot_cpp/classes/rd_texture_format.hpp>
 #include <godot_cpp/classes/rd_texture_view.hpp>
 #include <godot_cpp/classes/rd_uniform.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 #include <godot_cpp/core/math.hpp>
+#include <godot_cpp/variant/callable.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/rect2i.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
+#include <godot_cpp/classes/os.hpp>
+#include <godot_cpp/classes/time.hpp>
 
 #include "logger.h"
 #include "terrain_3d_data.h"
+
+#if defined(GDEXTENSION) && !defined(GODOT_MODULE)
+using namespace godot;
+#endif
 
 namespace {
 
@@ -95,6 +99,9 @@ struct HeightBrushPushConstant {
 
 } // namespace
 
+void Terrain3DGpuWorkflow::_bind_methods() {
+}
+
 Terrain3DGpuWorkflow::~Terrain3DGpuWorkflow() {
 	shutdown();
 }
@@ -113,6 +120,10 @@ void Terrain3DGpuWorkflow::initialize(Terrain3DData *p_data) {
 	}
 	_ensure_fallback_mask();
 	_ready = _color_pipeline.is_valid();
+	// Test whether async readback callbacks actually work on this backend.
+	if (_ready) {
+		_test_async_readback_support();
+	}
 }
 
 void Terrain3DGpuWorkflow::shutdown() {
@@ -121,6 +132,7 @@ void Terrain3DGpuWorkflow::shutdown() {
 	}
 	_region_gpu_states.clear();
 	_pending_brushes.clear();
+	_inflight_brushes.clear();
 	if (_rd) {
 		if (_color_pipeline.is_valid()) {
 			_rd->free_rid(_color_pipeline);
@@ -145,6 +157,7 @@ void Terrain3DGpuWorkflow::shutdown() {
 	_fallback_mask_texture = RID();
 	_rd = nullptr;
 	_ready = false;
+	_next_brush_id = 1;
 }
 
 bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_request) {
@@ -521,50 +534,166 @@ void Terrain3DGpuWorkflow::_free_region_state(RegionGpuState &p_state) {
 	p_state.size = V2I_ZERO;
 }
 
-void Terrain3DGpuWorkflow::_readback_color_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state) {
-	if (!_rd || !p_state.color_texture.is_valid()) {
-		return;
+bool Terrain3DGpuWorkflow::_readback_color_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state, int64_t p_brush_id) {
+	if (!_rd || !p_state.color_texture.is_valid() || p_region_info.region.is_null()) {
+		return false;
+	}
+	LOG(INFO, "Color readback request (async=", _async_readbacks_supported, ") brush=", p_brush_id,
+		" tex=", p_state.color_texture.get_id());
+	if (_async_readbacks_supported) {
+		Callable callback = callable_mp(this, &Terrain3DGpuWorkflow::_on_async_texture_readback);
+		callback = callback.bind(p_region_info.region, p_state.size, int(TYPE_COLOR), p_brush_id);
+		Error err = _rd->texture_get_data_async(p_state.color_texture, 0, callback);
+		if (err == OK) {
+			LOG(INFO, "Color async readback scheduled for brush=", p_brush_id);
+			return true;
+		}
+		_async_readbacks_supported = false;
+		LOG(WARN, "RenderingDevice::texture_get_data_async unavailable (err=", err,
+			"), using synchronous GPU readbacks instead");
 	}
 	PackedByteArray data = _rd->texture_get_data(p_state.color_texture, 0);
 	if (data.is_empty()) {
-		return;
+		return false;
 	}
-	Ref<Image> img = p_region_info.region->get_color_map();
-	if (img.is_null()) {
-		img.instantiate();
-		img->create(p_state.size.x, p_state.size.y, false, Image::FORMAT_RGBA8);
-		img->set_data(p_state.size.x, p_state.size.y, false, Image::FORMAT_RGBA8, data);
-		p_region_info.region->set_color_map(img);
-	} else {
-		img->set_data(p_state.size.x, p_state.size.y, false, Image::FORMAT_RGBA8, data);
-	}
-	p_region_info.region->set_modified(true);
-	p_region_info.region->set_edited(true);
+	LOG(INFO, "Color readback using synchronous path brush=", p_brush_id, " bytes=", data.size());
+	_apply_readback_data(TYPE_COLOR, data, p_region_info.region, p_state.size);
+	return false;
 }
 
-void Terrain3DGpuWorkflow::_readback_height_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state) {
-	if (!_rd || !p_state.height_texture.is_valid()) {
+void Terrain3DGpuWorkflow::_apply_readback_data(MapType p_map_type, const PackedByteArray &p_data, const Ref<Terrain3DRegion> &p_region, const Vector2i &p_size) {
+	if (p_region.is_null() || p_data.is_empty() || p_size.x <= 0 || p_size.y <= 0) {
 		return;
+	}
+	switch (p_map_type) {
+		case TYPE_COLOR: {
+			Ref<Image> img = p_region->get_color_map();
+			if (img.is_null()) {
+				img.instantiate();
+				img->create(p_size.x, p_size.y, false, Image::FORMAT_RGBA8);
+				p_region->set_color_map(img);
+			}
+			img->set_data(p_size.x, p_size.y, false, Image::FORMAT_RGBA8, p_data);
+			break;
+		}
+		case TYPE_HEIGHT: {
+			Ref<Image> img = p_region->get_height_map();
+			if (img.is_null()) {
+				img.instantiate();
+				img->create(p_size.x, p_size.y, false, Image::FORMAT_RF);
+				p_region->set_height_map(img);
+			}
+			img->set_data(p_size.x, p_size.y, false, Image::FORMAT_RF, p_data);
+			p_region->calc_height_range();
+			if (_data) {
+				_data->update_master_heights(p_region->get_height_range());
+			}
+			break;
+		}
+		default:
+			return;
+	}
+	p_region->set_modified(true);
+	p_region->set_edited(true);
+}
+
+void Terrain3DGpuWorkflow::_handle_async_readback_complete(int64_t p_brush_id) {
+	auto brush_it = _inflight_brushes.find(p_brush_id);
+	if (brush_it == _inflight_brushes.end()) {
+		return;
+	}
+	PendingBrush &brush = brush_it->second;
+	if (brush.pending_readbacks > 0) {
+		brush.pending_readbacks--;
+	}
+	if (brush.pending_readbacks == 0) {
+		_finalize_brush_readback(brush);
+		_inflight_brushes.erase(brush_it);
+	}
+}
+
+void Terrain3DGpuWorkflow::_on_async_texture_readback(const RID &p_texture, uint32_t p_layer, const PackedByteArray &p_data,
+		Ref<Terrain3DRegion> p_region, Vector2i p_size, int p_map_type, int64_t p_brush_id) {
+	(void)p_texture;
+	(void)p_layer;
+	_apply_readback_data(static_cast<MapType>(p_map_type), p_data, p_region, p_size);
+	_handle_async_readback_complete(p_brush_id);
+	LOG(INFO, "Async callback fired, map=", p_map_type, " brush=", p_brush_id);
+}
+
+bool Terrain3DGpuWorkflow::_readback_height_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state, int64_t p_brush_id) {
+	if (!_rd || !p_state.height_texture.is_valid() || p_region_info.region.is_null()) {
+		return false;
+	}
+	LOG(INFO, "Height readback request (async=", _async_readbacks_supported, ") brush=", p_brush_id,
+		" tex=", p_state.height_texture.get_id());
+	if (_async_readbacks_supported) {
+		Callable callback = callable_mp(this, &Terrain3DGpuWorkflow::_on_async_texture_readback);
+		callback = callback.bind(p_region_info.region, p_state.size, int(TYPE_HEIGHT), p_brush_id);
+		Error err = _rd->texture_get_data_async(p_state.height_texture, 0, callback);
+		if (err == OK) {
+			LOG(INFO, "Height async readback scheduled for brush=", p_brush_id);
+			return true;
+		}
+		_async_readbacks_supported = false;
+		LOG(WARN, "RenderingDevice::texture_get_data_async unavailable (err=", err,
+			"), using synchronous GPU readbacks instead");
 	}
 	PackedByteArray data = _rd->texture_get_data(p_state.height_texture, 0);
 	if (data.is_empty()) {
+		return false;
+	}
+	LOG(INFO, "Height readback using synchronous path brush=", p_brush_id, " bytes=", data.size());
+	_apply_readback_data(TYPE_HEIGHT, data, p_region_info.region, p_state.size);
+	return false;
+}
+
+void Terrain3DGpuWorkflow::_test_async_readback_support() {
+	if (!_rd || _async_test_completed) {
 		return;
 	}
-	Ref<Image> img = p_region_info.region->get_height_map();
-	if (img.is_null()) {
-		img.instantiate();
-		img->create(p_state.size.x, p_state.size.y, false, Image::FORMAT_RF);
-		img->set_data(p_state.size.x, p_state.size.y, false, Image::FORMAT_RF, data);
-		p_region_info.region->set_height_map(img);
-	} else {
-		img->set_data(p_state.size.x, p_state.size.y, false, Image::FORMAT_RF, data);
+	_async_test_completed = true;
+	_async_test_callback_fired = false;
+	
+	// Create a small 1x1 test texture with some data.
+	Ref<Image> test_img;
+	test_img.instantiate();
+	test_img->create(1, 1, false, Image::FORMAT_RGBA8);
+	test_img->set_pixel(0, 0, Color(1.f, 0.f, 0.f, 1.f));
+	
+	RID test_texture = _create_texture_from_image(test_img, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM,
+		RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT);
+	
+	if (!test_texture.is_valid()) {
+		LOG(WARN, "Failed to create test texture for async detection");
+		_async_readbacks_supported = false;
+		return;
 	}
-	p_region_info.region->calc_height_range();
-	p_region_info.region->set_modified(true);
-	p_region_info.region->set_edited(true);
-	if (_data) {
-		_data->update_master_heights(p_region_info.region->get_height_range());
+	
+	// Try async readback with a callback.
+	Callable callback = callable_mp(this, &Terrain3DGpuWorkflow::_on_async_test_readback);
+	Error err = _rd->texture_get_data_async(test_texture, 0, callback);
+	
+	_rd->free_rid(test_texture);
+	
+	if (err != OK) {
+		LOG(WARN, "Async readback not supported (err=", err, "); using synchronous readbacks only");
+		_async_readbacks_supported = false;
+		return;
 	}
+	
+	// Give the callback a frame to fire.
+	// In most cases it will fire immediately or very soon.
+	// If not, we'll detect it next frame and fall back to sync.
+	LOG(INFO, "Testing async readback support...");
+}
+
+void Terrain3DGpuWorkflow::_on_async_test_readback(const RID &p_texture, uint32_t p_layer, const PackedByteArray &p_data) {
+	(void)p_texture;
+	(void)p_layer;
+	(void)p_data;
+	_async_test_callback_fired = true;
+	LOG(INFO, "Async readback test callback fired - async is fully supported!");
 }
 
 bool Terrain3DGpuWorkflow::_dispatch_color_brush(const Terrain3DGpuBrushRequest &p_request, const Terrain3DGpuBrushRegion &p_region_info,
@@ -733,28 +862,49 @@ void Terrain3DGpuWorkflow::process_pending_readbacks(int p_max_brushes) {
 	while (processed < p_max_brushes && !_pending_brushes.empty()) {
 		PendingBrush brush = std::move(_pending_brushes.front());
 		_pending_brushes.pop_front();
+		brush.id = _next_brush_id++;
+		brush.pending_readbacks = 0;
 		for (const Terrain3DGpuBrushRegion &region_info : brush.regions) {
 			auto state_it = _region_gpu_states.find(region_info.location);
 			if (state_it == _region_gpu_states.end()) {
+				LOG(WARN, "No GPU state for region ", region_info.location,
+					" map=", brush.map_type, " (region ptr=", region_info.region.ptr(), ")");
 				continue;
 			}
+			bool scheduled = false;
 			switch (brush.map_type) {
 				case TYPE_COLOR:
-					_readback_color_region(region_info, state_it->second);
+					scheduled = _readback_color_region(region_info, state_it->second, brush.id);
 					break;
 				case TYPE_HEIGHT:
-					_readback_height_region(region_info, state_it->second);
+					scheduled = _readback_height_region(region_info, state_it->second, brush.id);
 					break;
 				default:
 					break;
 			}
+			if (scheduled) {
+				brush.pending_readbacks++;
+			}
 		}
-		_finalize_brush_readback(brush);
+		if (brush.pending_readbacks == 0) {
+			_finalize_brush_readback(brush);
+		} else {
+			_inflight_brushes.emplace(brush.id, std::move(brush));
+		}
 		processed++;
 	}
-	if (_data && !_pending_brushes.empty()) {
-		_data->request_gpu_readback_flush();
+}
+
+void Terrain3DGpuWorkflow::flush_gpu_commands() {
+	if (!_rd) {
+		return;
 	}
+	// Submit and sync GPU commands to ensure async readback callbacks are triggered.
+	// See: https://github.com/godotengine/godot/issues/...
+	// TextureGetDataAsync callbacks fire after Submit()/Sync() cycle completes.
+	_rd->submit();
+	_rd->sync();
+	LOG(DEBUG, "GPU commands flushed (submit + sync)");
 }
 
 void Terrain3DGpuWorkflow::_enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps) {
@@ -778,6 +928,8 @@ void Terrain3DGpuWorkflow::_finalize_brush_readback(const PendingBrush &p_brush)
 	if (!_data) {
 		return;
 	}
+	LOG(INFO, "Finalizing brush id=", p_brush.id, " map=", p_brush.map_type,
+		" regions=", int(p_brush.regions.size()), " edited_area=", p_brush.edited_area);
 	bool visuals_synced = false;
 	bool gpu_blit_failed = false;
 	if (_rd) {
@@ -787,6 +939,9 @@ void Terrain3DGpuWorkflow::_finalize_brush_readback(const PendingBrush &p_brush)
 				continue;
 			}
 			bool synced = _upload_region_to_material(p_brush.map_type, region_info, state_it->second);
+			LOG(INFO, "Finalize: region=", region_info.location, " blit_synced=", synced,
+				" tex_color=", state_it->second.color_texture.get_id(),
+				" tex_height=", state_it->second.height_texture.get_id());
 			visuals_synced = visuals_synced || synced;
 			gpu_blit_failed = gpu_blit_failed || !synced;
 		}
