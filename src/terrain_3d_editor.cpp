@@ -1103,6 +1103,10 @@ void Terrain3DEditor::start_operation(const Vector3 &p_global_position) {
 	_terrain->get_data()->clear_edited_area();
 	_operation_position = p_global_position;
 	_operation_movement = V3_ZERO;
+	// Enable GPU preview mode for smoother interactive painting when possible
+	if (_terrain && _terrain->get_data() && _terrain->get_data()->is_gpu_workflow_ready()) {
+		_terrain->get_data()->set_gpu_preview_mode(true);
+	}
 }
 
 // Called on mouse movement with left mouse button down
@@ -1180,6 +1184,11 @@ void Terrain3DEditor::stop_operation() {
 	_added_removed_locations = TypedArray<Vector2i>();
 	_terrain->get_data()->clear_edited_area();
 	_is_operating = false;
+	// Finalize any GPU preview (perform readbacks and CPU-side updates)
+	if (_terrain && _terrain->get_data()) {
+		_terrain->get_data()->finalize_gpu_preview();
+		_terrain->get_data()->set_gpu_preview_mode(false);
+	}
 }
 
 ///////////////////////////

@@ -417,6 +417,20 @@ void Terrain3DData::request_gpu_readback_flush() {
 	}
 }
 
+void Terrain3DData::set_gpu_preview_mode(bool p_enabled) {
+	if (!_gpu_workflow) {
+		return;
+	}
+	_gpu_workflow->set_preview_mode(p_enabled);
+}
+
+void Terrain3DData::finalize_gpu_preview() {
+	if (!_gpu_workflow) {
+		return;
+	}
+	_gpu_workflow->finalize_preview();
+}
+
 void Terrain3DData::_process_gpu_readback_flush() {
 	_gpu_readback_flush_scheduled = false;
 	if (!_gpu_workflow_enabled || !_gpu_workflow) {

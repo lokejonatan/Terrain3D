@@ -120,6 +120,10 @@ public:
 	bool apply_gpu_color_brush(const Terrain3DGpuBrushRequest &p_request);
 	bool apply_gpu_height_brush(const Terrain3DGpuBrushRequest &p_request);
 	void request_gpu_readback_flush();
+	// Preview API: enable GPU-only preview mode (no CPU readbacks) and finalize
+	// the preview (perform readbacks) when the stroke ends.
+	void set_gpu_preview_mode(bool p_enabled);
+	void finalize_gpu_preview();
 	void notify_gpu_height_brush_complete(const AABB &p_area, bool p_update_instancer, bool p_update_collision);
 	void set_region_locations(const TypedArray<Vector2i> &p_locations);
 	TypedArray<Vector2i> get_region_locations() const { return _region_locations; }
