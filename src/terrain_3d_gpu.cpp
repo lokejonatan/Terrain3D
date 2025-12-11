@@ -196,6 +196,16 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 		if (dispatched) {
 			processed_regions.push_back(region_info);
 			dispatch_count++;
+
+			// If we're in GPU preview mode, immediately blit the GPU texture
+			// to the material so the user sees realtime feedback without
+			// performing CPU readbacks.
+			if (_preview_mode) {
+				bool synced = _upload_region_to_material(TYPE_COLOR, region_info, state);
+				if (synced && _data) {
+					_data->_notify_gpu_maps_synced(TYPE_COLOR);
+				}
+			}
 		}
 	}
 
@@ -208,7 +218,13 @@ bool Terrain3DGpuWorkflow::apply_color_brush(const Terrain3DGpuBrushRequest &p_r
 	}
 	Terrain3DGpuBrushRequest queued_request = p_request;
 	queued_request.regions = std::move(processed_regions);
-	_enqueue_readback_brush(queued_request, true);
+	if (_preview_mode) {
+		// Store brush for later final readback but avoid scheduling readbacks
+		// immediately — CPU work is deferred until stroke end.
+		_preview_brushes.push_back(std::move(queued_request));
+	} else {
+		_enqueue_readback_brush(queued_request, true);
+	}
 	LOG(INFO, "GPU workflow dispatched ", dispatch_count, " region(s)");
 	return true;
 }
@@ -248,6 +264,16 @@ bool Terrain3DGpuWorkflow::apply_height_brush(const Terrain3DGpuBrushRequest &p_
 		if (dispatched) {
 			processed_regions.push_back(region_info);
 			dispatch_count++;
+
+			// Provide realtime GPU-only preview by blitting the updated texture
+			// to the material. This shows the user the brush result without
+			// performing expensive CPU readbacks during the stroke.
+			if (_preview_mode) {
+				bool synced = _upload_region_to_material(TYPE_HEIGHT, region_info, state);
+				if (synced && _data) {
+					_data->_notify_gpu_maps_synced(TYPE_HEIGHT);
+				}
+			}
 		}
 	}
 	if (mask_texture.is_valid() && mask_texture != _fallback_mask_texture) {
@@ -259,7 +285,11 @@ bool Terrain3DGpuWorkflow::apply_height_brush(const Terrain3DGpuBrushRequest &p_
 	}
 	Terrain3DGpuBrushRequest queued_request = p_request;
 	queued_request.regions = std::move(processed_regions);
-	_enqueue_readback_brush(queued_request, false);
+	if (_preview_mode) {
+		_preview_brushes.push_back(std::move(queued_request));
+	} else {
+		_enqueue_readback_brush(queued_request, false);
+	}
 	LOG(INFO, "GPU workflow dispatched height brush to ", dispatch_count, " region(s)");
 	return true;
 }
@@ -899,12 +929,38 @@ void Terrain3DGpuWorkflow::flush_gpu_commands() {
 	if (!_rd) {
 		return;
 	}
-	// Submit and sync GPU commands to ensure async readback callbacks are triggered.
-	// See: https://github.com/godotengine/godot/issues/...
-	// TextureGetDataAsync callbacks fire after Submit()/Sync() cycle completes.
-	_rd->submit();
-	_rd->sync();
-	LOG(DEBUG, "GPU commands flushed (submit + sync)");
+	// Only LocalRenderingDevice supports explicit submit/sync. Calling these on the
+	// main device prints errors like "Only local devices can submit and sync.".
+	String cls = _rd->get_class();
+	if (cls == String("LocalRenderingDevice")) {
+		_rd->submit();
+		_rd->sync();
+		LOG(DEBUG, "GPU commands flushed (submit + sync) via LocalRenderingDevice");
+	} else {
+		// For the main rendering device, the engine drives Submit/Sync each frame.
+		// We skip explicit submit/sync to avoid error logs; async callbacks will
+		// be invoked by the engine when the frame completes.
+		LOG(DEBUG, "Skipping submit/sync on non-local RenderingDevice (class=", cls, ")");
+	}
+}
+
+void Terrain3DGpuWorkflow::finalize_preview() {
+	if (_preview_brushes.empty()) {
+		return;
+	}
+	while (!_preview_brushes.empty()) {
+		Terrain3DGpuBrushRequest req = std::move(_preview_brushes.front());
+		_preview_brushes.pop_front();
+		_enqueue_readback_brush(req, req.map_type == TYPE_COLOR);
+	}
+	// Trigger processing of pending readbacks immediately for responsiveness
+	if (_data) {
+		_data->request_gpu_readback_flush();
+	}
+}
+
+void Terrain3DGpuWorkflow::set_preview_mode(bool p_enabled) {
+	_preview_mode = p_enabled;
 }
 
 void Terrain3DGpuWorkflow::_enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps) {

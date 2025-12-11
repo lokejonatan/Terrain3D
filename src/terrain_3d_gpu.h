@@ -77,6 +77,10 @@ public:
 	bool apply_color_brush(const Terrain3DGpuBrushRequest &p_request);
 	bool apply_height_brush(const Terrain3DGpuBrushRequest &p_request);
 
+	// Preview API: enable/disable GPU preview mode and finalize preview (enqueue readbacks)
+	void set_preview_mode(bool p_enabled);
+	void finalize_preview();
+
 	void remove_region(const Vector2i &p_region_loc);
 	void process_pending_readbacks(int p_max_brushes = 1);
 	bool has_pending_readbacks() const { return !_pending_brushes.empty() || !_inflight_brushes.empty(); }
@@ -119,6 +123,11 @@ private:
 	bool _async_readbacks_supported = true;
 	bool _async_test_completed = false;
 	bool _async_test_callback_fired = false;
+	// Preview mode: when true, GPU dispatches will update visuals but readbacks
+	// are deferred until `finalize_preview()` is called. This avoids per-frame
+	// CPU work while painting large areas.
+	bool _preview_mode = false;
+	std::deque<Terrain3DGpuBrushRequest> _preview_brushes;
 
 	bool _ensure_color_pipeline();
 	bool _ensure_height_pipeline();
@@ -145,6 +154,9 @@ private:
 	// Detect if async readback callbacks are actually supported by the rendering backend.
 	void _test_async_readback_support();
 	void _on_async_test_readback(const RID &p_texture, uint32_t p_layer, const PackedByteArray &p_data);
+
+	// Preview helpers
+	// Implementations in cpp: set_preview_mode(), finalize_preview()
 };
 
 #endif // TERRAIN3D_GPU_WORKFLOW_H
