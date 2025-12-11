@@ -885,11 +885,26 @@ void Terrain3DGpuWorkflow::process_pending_readbacks(int p_max_brushes) {
 	if (p_max_brushes == 0) {
 		return;
 	}
-	if (p_max_brushes < 0) {
-		p_max_brushes = int(_pending_brushes.size());
+	// Determine how many brushes we are allowed to move/process this frame.
+	// A negative value means "process all", but that can freeze the editor
+	// when finalizing a very large stroke. Cap to a small number in that case.
+	int allowed = p_max_brushes;
+	if (allowed < 0) {
+		allowed = 2; // safe default cap when caller requested "all"
 	}
+
+	// Move up to `allowed` brushes from deferred finalizations into the
+	// pending queue. This stages the work so we don't enqueue everything at once.
+	int moved = 0;
+	while (moved < allowed && !_deferred_finalizations.empty()) {
+		PendingBrush b = std::move(_deferred_finalizations.front());
+		_deferred_finalizations.pop_front();
+		_pending_brushes.push_back(std::move(b));
+		moved++;
+	}
+
 	int processed = 0;
-	while (processed < p_max_brushes && !_pending_brushes.empty()) {
+	while (processed < allowed && !_pending_brushes.empty()) {
 		PendingBrush brush = std::move(_pending_brushes.front());
 		_pending_brushes.pop_front();
 		brush.id = _next_brush_id++;
@@ -948,12 +963,24 @@ void Terrain3DGpuWorkflow::finalize_preview() {
 	if (_preview_brushes.empty()) {
 		return;
 	}
+	// Convert queued preview requests into deferred finalization brushes and
+	// move them into `_deferred_finalizations`. They will be processed in
+	// small batches by `process_pending_readbacks` to avoid blocking the UI.
 	while (!_preview_brushes.empty()) {
 		Terrain3DGpuBrushRequest req = std::move(_preview_brushes.front());
 		_preview_brushes.pop_front();
-		_enqueue_readback_brush(req, req.map_type == TYPE_COLOR);
+		PendingBrush brush;
+		brush.map_type = req.map_type;
+		brush.regions = std::move(req.regions);
+		brush.edited_area = req.edited_area;
+		brush.update_instancer = req.update_instancer;
+		brush.update_collision = req.update_collision;
+		brush.generate_color_mipmaps = (req.map_type == TYPE_COLOR);
+		// id and pending_readbacks set later when processing
+		_deferred_finalizations.push_back(std::move(brush));
 	}
-	// Trigger processing of pending readbacks immediately for responsiveness
+
+	// Kick the readback processing loop (it will process a small batch).
 	if (_data) {
 		_data->request_gpu_readback_flush();
 	}

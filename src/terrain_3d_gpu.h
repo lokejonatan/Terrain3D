@@ -128,6 +128,10 @@ private:
 	// CPU work while painting large areas.
 	bool _preview_mode = false;
 	std::deque<Terrain3DGpuBrushRequest> _preview_brushes;
+	// Deferred finalization queue: stores pending brushes created when a preview
+	// is finalized. These are moved into `_pending_brushes` incrementally to
+	// avoid performing a large number of CPU readbacks in a single frame.
+	std::deque<PendingBrush> _deferred_finalizations;
 
 	bool _ensure_color_pipeline();
 	bool _ensure_height_pipeline();
