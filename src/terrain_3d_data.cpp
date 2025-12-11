@@ -703,6 +703,10 @@ void Terrain3DData::remove_region(const Ref<Terrain3DRegion> &p_region, const bo
 
 void Terrain3DData::save_directory(const String &p_dir) {
 	LOG(INFO, "Saving data files to ", p_dir);
+	// Ensure any GPU-only previews are committed before saving.
+	if (_gpu_workflow) {
+		_gpu_workflow->finalize_preview_blocking();
+	}
 	Array locations = _regions.keys();
 	for (const Vector2i &region_loc : locations) {
 		save_region(region_loc, p_dir, _terrain->get_save_16_bit());
@@ -718,6 +722,10 @@ void Terrain3DData::save_region(const Vector2i &p_region_loc, const String &p_di
 	if (region.is_null()) {
 		LOG(ERROR, "No region found at: ", p_region_loc);
 		return;
+	}
+	// Ensure any GPU-only previews are committed before saving this region.
+	if (_gpu_workflow) {
+		_gpu_workflow->finalize_preview_blocking();
 	}
 	String fname = Util::location_to_filename(p_region_loc);
 	String path = p_dir + String("/") + fname;

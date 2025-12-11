@@ -986,6 +986,65 @@ void Terrain3DGpuWorkflow::finalize_preview() {
 	}
 }
 
+void Terrain3DGpuWorkflow::finalize_preview_blocking() {
+	// First move any queued preview brushes into deferred finalizations
+	while (!_preview_brushes.empty()) {
+		Terrain3DGpuBrushRequest req = std::move(_preview_brushes.front());
+		_preview_brushes.pop_front();
+		PendingBrush brush;
+		brush.map_type = req.map_type;
+		brush.regions = std::move(req.regions);
+		brush.edited_area = req.edited_area;
+		brush.update_instancer = req.update_instancer;
+		brush.update_collision = req.update_collision;
+		brush.generate_color_mipmaps = (req.map_type == TYPE_COLOR);
+		_deferred_finalizations.push_back(std::move(brush));
+	}
+
+	// Process all deferred finalizations synchronously by performing
+	// immediate synchronous readbacks and applying data to regions.
+	while (!_deferred_finalizations.empty()) {
+		PendingBrush brush = std::move(_deferred_finalizations.front());
+		_deferred_finalizations.pop_front();
+		brush.id = _next_brush_id++;
+
+		for (const Terrain3DGpuBrushRegion &region_info : brush.regions) {
+			auto state_it = _region_gpu_states.find(region_info.location);
+			if (state_it == _region_gpu_states.end()) {
+				LOG(WARN, "No GPU state for region ", region_info.location,
+					" map=", brush.map_type, " (region ptr=", region_info.region.ptr(), ")");
+				continue;
+			}
+			const RegionGpuState &state = state_it->second;
+			PackedByteArray data;
+			switch (brush.map_type) {
+				case TYPE_COLOR:
+					if (!state.color_texture.is_valid()) {
+						continue;
+					}
+					data = _rd->texture_get_data(state.color_texture, 0);
+					break;
+				case TYPE_HEIGHT:
+					if (!state.height_texture.is_valid()) {
+						continue;
+					}
+					data = _rd->texture_get_data(state.height_texture, 0);
+					break;
+				default:
+					continue;
+			}
+			if (data.is_empty()) {
+				LOG(WARN, "Blocking finalize: readback returned empty for region=", region_info.location);
+				continue;
+			}
+			_apply_readback_data(brush.map_type, data, region_info.region, state.size);
+		}
+
+		// Finalize the brush (updates maps, notifies instancer/collision)
+		_finalize_brush_readback(brush);
+	}
+}
+
 void Terrain3DGpuWorkflow::set_preview_mode(bool p_enabled) {
 	_preview_mode = p_enabled;
 }

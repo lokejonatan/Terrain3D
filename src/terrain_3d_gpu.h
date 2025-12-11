@@ -80,6 +80,9 @@ public:
 	// Preview API: enable/disable GPU preview mode and finalize preview (enqueue readbacks)
 	void set_preview_mode(bool p_enabled);
 	void finalize_preview();
+	// Blocking finalize: commit any GPU previews synchronously (safe to call
+	// before saving or unloading a scene).
+	void finalize_preview_blocking();
 
 	void remove_region(const Vector2i &p_region_loc);
 	void process_pending_readbacks(int p_max_brushes = 1);
