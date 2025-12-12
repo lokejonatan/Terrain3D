@@ -9,6 +9,7 @@
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/variant/aabb.hpp>
 #include <godot_cpp/variant/color.hpp>
+#include <godot_cpp/variant/callable.hpp>
 #include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/vector2.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
@@ -86,7 +87,11 @@ public:
 
 	void remove_region(const Vector2i &p_region_loc);
 	void process_pending_readbacks(int p_max_brushes = 1);
-	bool has_pending_readbacks() const { return !_pending_brushes.empty() || !_inflight_brushes.empty(); }
+	bool has_pending_readbacks() const {
+		return !_preview_brushes.empty() || !_deferred_finalizations.empty() || !_pending_brushes.empty() || !_inflight_brushes.empty();
+	}
+	bool has_pending_work() const { return has_pending_readbacks(); }
+	void call_when_idle(const Callable &p_callable);
 	void flush_gpu_commands(); // Submit and sync GPU commands to trigger async readback callbacks
 
 protected:
@@ -135,6 +140,7 @@ private:
 	// is finalized. These are moved into `_pending_brushes` incrementally to
 	// avoid performing a large number of CPU readbacks in a single frame.
 	std::deque<PendingBrush> _deferred_finalizations;
+	std::deque<Callable> _idle_callbacks;
 
 	bool _ensure_color_pipeline();
 	bool _ensure_height_pipeline();
@@ -164,6 +170,7 @@ private:
 
 	// Preview helpers
 	// Implementations in cpp: set_preview_mode(), finalize_preview()
+	void _notify_idle_if_needed();
 };
 
 #endif // TERRAIN3D_GPU_WORKFLOW_H

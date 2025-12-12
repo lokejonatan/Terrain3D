@@ -48,6 +48,7 @@ static bool _image_has_pixels(const Ref<Image> &p_image, const String &p_label) 
 	return true;
 }
 
+
 struct ColorBrushPushConstant {
 	int32_t target_origin_x = 0;
 	int32_t target_origin_y = 0;
@@ -133,6 +134,9 @@ void Terrain3DGpuWorkflow::shutdown() {
 	_region_gpu_states.clear();
 	_pending_brushes.clear();
 	_inflight_brushes.clear();
+	_deferred_finalizations.clear();
+	_preview_brushes.clear();
+	_idle_callbacks.clear();
 	if (_rd) {
 		if (_color_pipeline.is_valid()) {
 			_rd->free_rid(_color_pipeline);
@@ -640,6 +644,7 @@ void Terrain3DGpuWorkflow::_handle_async_readback_complete(int64_t p_brush_id) {
 		_finalize_brush_readback(brush);
 		_inflight_brushes.erase(brush_it);
 	}
+	_notify_idle_if_needed();
 }
 
 void Terrain3DGpuWorkflow::_on_async_texture_readback(const RID &p_texture, uint32_t p_layer, const PackedByteArray &p_data,
@@ -938,6 +943,7 @@ void Terrain3DGpuWorkflow::process_pending_readbacks(int p_max_brushes) {
 		}
 		processed++;
 	}
+	_notify_idle_if_needed();
 }
 
 void Terrain3DGpuWorkflow::flush_gpu_commands() {
@@ -986,8 +992,8 @@ void Terrain3DGpuWorkflow::finalize_preview() {
 	}
 }
 
+
 void Terrain3DGpuWorkflow::finalize_preview_blocking() {
-	// First move any queued preview brushes into deferred finalizations
 	while (!_preview_brushes.empty()) {
 		Terrain3DGpuBrushRequest req = std::move(_preview_brushes.front());
 		_preview_brushes.pop_front();
@@ -1001,8 +1007,6 @@ void Terrain3DGpuWorkflow::finalize_preview_blocking() {
 		_deferred_finalizations.push_back(std::move(brush));
 	}
 
-	// Process all deferred finalizations synchronously by performing
-	// immediate synchronous readbacks and applying data to regions.
 	while (!_deferred_finalizations.empty()) {
 		PendingBrush brush = std::move(_deferred_finalizations.front());
 		_deferred_finalizations.pop_front();
@@ -1040,8 +1044,33 @@ void Terrain3DGpuWorkflow::finalize_preview_blocking() {
 			_apply_readback_data(brush.map_type, data, region_info.region, state.size);
 		}
 
-		// Finalize the brush (updates maps, notifies instancer/collision)
 		_finalize_brush_readback(brush);
+	}
+
+	_notify_idle_if_needed();
+}
+
+void Terrain3DGpuWorkflow::call_when_idle(const Callable &p_callable) {
+	if (!p_callable.is_valid()) {
+		return;
+	}
+	if (!has_pending_work()) {
+		p_callable.call();
+		return;
+	}
+	_idle_callbacks.push_back(p_callable);
+}
+
+void Terrain3DGpuWorkflow::_notify_idle_if_needed() {
+	if (has_pending_work()) {
+		return;
+	}
+	while (!_idle_callbacks.empty()) {
+		Callable cb = _idle_callbacks.front();
+		_idle_callbacks.pop_front();
+		if (cb.is_valid()) {
+			cb.call();
+		}
 	}
 }
 
