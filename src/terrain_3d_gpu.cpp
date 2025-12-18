@@ -574,6 +574,10 @@ bool Terrain3DGpuWorkflow::_readback_color_region(const Terrain3DGpuBrushRegion 
 	}
 	LOG(INFO, "Color readback request (async=", _async_readbacks_supported, ") brush=", p_brush_id,
 		" tex=", p_state.color_texture.get_id());
+	if (_async_readbacks_supported && _async_test_completed && !_async_test_callback_fired) {
+		LOG(WARN, "Async readback test callback never fired; falling back to synchronous readbacks");
+		_async_readbacks_supported = false;
+	}
 	if (_async_readbacks_supported) {
 		Callable callback = callable_mp(this, &Terrain3DGpuWorkflow::_on_async_texture_readback);
 		callback = callback.bind(p_region_info.region, p_state.size, int(TYPE_COLOR), p_brush_id);
@@ -662,6 +666,10 @@ bool Terrain3DGpuWorkflow::_readback_height_region(const Terrain3DGpuBrushRegion
 	}
 	LOG(INFO, "Height readback request (async=", _async_readbacks_supported, ") brush=", p_brush_id,
 		" tex=", p_state.height_texture.get_id());
+	if (_async_readbacks_supported && _async_test_completed && !_async_test_callback_fired) {
+		LOG(WARN, "Async readback test callback never fired; falling back to synchronous readbacks");
+		_async_readbacks_supported = false;
+	}
 	if (_async_readbacks_supported) {
 		Callable callback = callable_mp(this, &Terrain3DGpuWorkflow::_on_async_texture_readback);
 		callback = callback.bind(p_region_info.region, p_state.size, int(TYPE_HEIGHT), p_brush_id);
