@@ -33,6 +33,7 @@ enum class Terrain3DGpuHeightMode {
 	RAISE = 0,
 	LOWER = 1,
 	SET_TO_HEIGHT = 2,
+	SMOOTH = 3,
 };
 
 struct Terrain3DGpuBrushRegion {

@@ -21,7 +21,7 @@ layout(push_constant, std430) uniform HeightBrushParams {
 	float cursor_height;
 	int height_mode;
 	int use_alt;
-	vec2 padding;
+	vec4 padding; // Keep layout aligned with HeightBrushPushConstant in C++
 } params;
 
 float sample_mask(vec2 uv) {
@@ -71,6 +71,12 @@ float apply_height(float src, float influence) {
 	return src;
 }
 
+float sample_height_clamped(ivec2 coord) {
+	ivec2 max_coord = params.texture_size - ivec2(1);
+	ivec2 clamped = clamp(coord, ivec2(0), max_coord);
+	return imageLoad(height_map, clamped).r;
+}
+
 void main() {
 	ivec2 local_id = ivec2(gl_GlobalInvocationID.xy);
 	if (local_id.x >= params.target_size.x || local_id.y >= params.target_size.y) {
@@ -91,6 +97,22 @@ void main() {
 	float influence = max(mask * params.strength, 0.0);
 
 	vec4 src_texel = imageLoad(height_map, pixel);
+	const int MODE_SMOOTH = 3;
+	if (params.height_mode == MODE_SMOOTH) {
+		float src_height = src_texel.r;
+		float left = sample_height_clamped(pixel + ivec2(-1, 0));
+		float right = sample_height_clamped(pixel + ivec2(1, 0));
+		float up = sample_height_clamped(pixel + ivec2(0, 1));
+		float down = sample_height_clamped(pixel + ivec2(0, -1));
+		float avg_height = (src_height + left + right + up + down) * 0.2;
+		float smooth_alpha = clamp(mask * params.strength * 2.0, 0.02, 1.0);
+		float smooth_result = mix(src_height, avg_height, smooth_alpha);
+		if (smooth_result != src_height) {
+			imageStore(height_map, pixel, vec4(smooth_result, 0.0, 0.0, 1.0));
+		}
+		return;
+	}
+
 	float result = apply_height(src_texel.r, influence);
 	if (result != src_texel.r) {
 		imageStore(height_map, pixel, vec4(result, 0.0, 0.0, 1.0));

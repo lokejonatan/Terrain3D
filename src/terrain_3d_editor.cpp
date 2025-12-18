@@ -197,12 +197,15 @@ void Terrain3DEditor::_operate_map(const Vector3 &p_global_position, const real_
 			return;
 		}
 	}
-	if (data->is_gpu_workflow_ready() && map_type == TYPE_HEIGHT && (_tool == SCULPT || _tool == HEIGHT) &&
-			(_operation == ADD || _operation == SUBTRACT)) {
-		bool gpu_used = _try_gpu_height_brush(p_global_position, edited_area, brush_size, strength, gamma, rot,
-				brush_ref, height, modifier_alt, regions_added_removed);
-		if (gpu_used) {
-			return;
+	if (data->is_gpu_workflow_ready() && map_type == TYPE_HEIGHT && (_tool == SCULPT || _tool == HEIGHT)) {
+		bool gpu_supported = (_operation == ADD || _operation == SUBTRACT ||
+				(_operation == AVERAGE && _tool == SCULPT));
+		if (gpu_supported) {
+			bool gpu_used = _try_gpu_height_brush(p_global_position, edited_area, brush_size, strength, gamma, rot,
+					brush_ref, height, modifier_alt, regions_added_removed);
+			if (gpu_used) {
+				return;
+			}
 		}
 	}
 
@@ -697,8 +700,12 @@ bool Terrain3DEditor::_try_gpu_height_brush(const Vector3 &p_global_position, co
 		LOG(INFO, "GPU height brush skipped: unsupported tool");
 		return false;
 	}
-	if (_operation != ADD && _operation != SUBTRACT) {
+	if (_operation != ADD && _operation != SUBTRACT && _operation != AVERAGE) {
 		LOG(INFO, "GPU height brush skipped: unsupported operation ", _operation);
+		return false;
+	}
+	if (_operation == AVERAGE && _tool != SCULPT) {
+		LOG(INFO, "GPU height brush skipped: smooth available only for sculpt tool");
 		return false;
 	}
 	if (p_brush_image.is_null()) {
@@ -716,9 +723,17 @@ bool Terrain3DEditor::_try_gpu_height_brush(const Vector3 &p_global_position, co
 	request.mask = p_brush_image;
 	request.vertex_spacing = data->get_vertex_spacing();
 	request.region_size = data->get_region_size_value();
-	request.height_mode = (_tool == HEIGHT) ? Terrain3DGpuHeightMode::SET_TO_HEIGHT :
-		(_operation == SUBTRACT ? Terrain3DGpuHeightMode::LOWER : Terrain3DGpuHeightMode::RAISE);
-	request.height_use_alt = p_modifier_alt && _tool != HEIGHT && !std::isnan(p_global_position.y);
+	Terrain3DGpuHeightMode height_mode = Terrain3DGpuHeightMode::RAISE;
+	if (_tool == HEIGHT) {
+		height_mode = Terrain3DGpuHeightMode::SET_TO_HEIGHT;
+	} else if (_operation == AVERAGE) {
+		height_mode = Terrain3DGpuHeightMode::SMOOTH;
+	} else if (_operation == SUBTRACT) {
+		height_mode = Terrain3DGpuHeightMode::LOWER;
+	}
+	request.height_mode = height_mode;
+	bool allow_alt = (_operation == ADD || _operation == SUBTRACT) && _tool != HEIGHT;
+	request.height_use_alt = allow_alt && p_modifier_alt && !std::isnan(p_global_position.y);
 	request.target_height = p_target_height;
 	request.cursor_height = p_global_position.y;
 	request.edited_area = p_edited_area;
