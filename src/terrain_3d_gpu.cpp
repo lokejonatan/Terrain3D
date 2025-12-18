@@ -137,6 +137,10 @@ void Terrain3DGpuWorkflow::shutdown() {
 	_deferred_finalizations.clear();
 	_preview_brushes.clear();
 	_idle_callbacks.clear();
+	_free_async_test_texture();
+	_async_test_completed = false;
+	_async_test_callback_fired = false;
+	_async_readbacks_supported = true;
 	if (_rd) {
 		if (_color_pipeline.is_valid()) {
 			_rd->free_rid(_color_pipeline);
@@ -568,6 +572,13 @@ void Terrain3DGpuWorkflow::_free_region_state(RegionGpuState &p_state) {
 	p_state.size = V2I_ZERO;
 }
 
+void Terrain3DGpuWorkflow::_free_async_test_texture() {
+	if (_rd && _async_test_texture.is_valid()) {
+		_rd->free_rid(_async_test_texture);
+	}
+	_async_test_texture = RID();
+}
+
 bool Terrain3DGpuWorkflow::_readback_color_region(const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state, int64_t p_brush_id) {
 	if (!_rd || !p_state.color_texture.is_valid() || p_region_info.region.is_null()) {
 		return false;
@@ -577,6 +588,7 @@ bool Terrain3DGpuWorkflow::_readback_color_region(const Terrain3DGpuBrushRegion 
 	if (_async_readbacks_supported && _async_test_completed && !_async_test_callback_fired) {
 		LOG(WARN, "Async readback test callback never fired; falling back to synchronous readbacks");
 		_async_readbacks_supported = false;
+		_free_async_test_texture();
 	}
 	if (_async_readbacks_supported) {
 		Callable callback = callable_mp(this, &Terrain3DGpuWorkflow::_on_async_texture_readback);
@@ -669,6 +681,7 @@ bool Terrain3DGpuWorkflow::_readback_height_region(const Terrain3DGpuBrushRegion
 	if (_async_readbacks_supported && _async_test_completed && !_async_test_callback_fired) {
 		LOG(WARN, "Async readback test callback never fired; falling back to synchronous readbacks");
 		_async_readbacks_supported = false;
+		_free_async_test_texture();
 	}
 	if (_async_readbacks_supported) {
 		Callable callback = callable_mp(this, &Terrain3DGpuWorkflow::_on_async_texture_readback);
@@ -697,6 +710,7 @@ void Terrain3DGpuWorkflow::_test_async_readback_support() {
 	}
 	_async_test_completed = true;
 	_async_test_callback_fired = false;
+	_free_async_test_texture();
 	
 	// Create a small 1x1 test texture with some data.
 	Ref<Image> test_img;
@@ -704,10 +718,10 @@ void Terrain3DGpuWorkflow::_test_async_readback_support() {
 	test_img->create(1, 1, false, Image::FORMAT_RGBA8);
 	test_img->set_pixel(0, 0, Color(1.f, 0.f, 0.f, 1.f));
 	
-	RID test_texture = _create_texture_from_image(test_img, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM,
+	_async_test_texture = _create_texture_from_image(test_img, RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM,
 		RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT);
-	
-	if (!test_texture.is_valid()) {
+
+	if (!_async_test_texture.is_valid()) {
 		LOG(WARN, "Failed to create test texture for async detection");
 		_async_readbacks_supported = false;
 		return;
@@ -715,13 +729,12 @@ void Terrain3DGpuWorkflow::_test_async_readback_support() {
 	
 	// Try async readback with a callback.
 	Callable callback = callable_mp(this, &Terrain3DGpuWorkflow::_on_async_test_readback);
-	Error err = _rd->texture_get_data_async(test_texture, 0, callback);
-	
-	_rd->free_rid(test_texture);
+	Error err = _rd->texture_get_data_async(_async_test_texture, 0, callback);
 	
 	if (err != OK) {
 		LOG(WARN, "Async readback not supported (err=", err, "); using synchronous readbacks only");
 		_async_readbacks_supported = false;
+		_free_async_test_texture();
 		return;
 	}
 	
@@ -737,6 +750,7 @@ void Terrain3DGpuWorkflow::_on_async_test_readback(const RID &p_texture, uint32_
 	(void)p_data;
 	_async_test_callback_fired = true;
 	LOG(INFO, "Async readback test callback fired - async is fully supported!");
+	_free_async_test_texture();
 }
 
 bool Terrain3DGpuWorkflow::_dispatch_color_brush(const Terrain3DGpuBrushRequest &p_request, const Terrain3DGpuBrushRegion &p_region_info,

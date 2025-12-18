@@ -131,6 +131,7 @@ private:
 	bool _async_readbacks_supported = true;
 	bool _async_test_completed = false;
 	bool _async_test_callback_fired = false;
+	RID _async_test_texture;
 	// Preview mode: when true, GPU dispatches will update visuals but readbacks
 	// are deferred until `finalize_preview()` is called. This avoids per-frame
 	// CPU work while painting large areas.
@@ -163,6 +164,7 @@ private:
 	void _on_async_texture_readback(const RID &p_texture, uint32_t p_layer, const PackedByteArray &p_data,
 		Ref<Terrain3DRegion> p_region, Vector2i p_size, int p_map_type, int64_t p_brush_id);
 	void _handle_async_readback_complete(int64_t p_brush_id);
+	void _free_async_test_texture();
 
 	// Detect if async readback callbacks are actually supported by the rendering backend.
 	void _test_async_readback_support();
