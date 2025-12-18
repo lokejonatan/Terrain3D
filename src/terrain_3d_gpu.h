@@ -160,6 +160,7 @@ private:
 		const RegionGpuState &p_state, const RID &p_mask_texture, const Vector2i &p_mask_size);
 	void _enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps);
 	void _finalize_brush_readback(const PendingBrush &p_brush);
+	void _coalesce_brush_queue(std::deque<PendingBrush> &p_queue);
 	bool _upload_region_to_material(MapType p_map_type, const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state);
 	void _apply_readback_data(MapType p_map_type, const PackedByteArray &p_data, const Ref<Terrain3DRegion> &p_region, const Vector2i &p_size);
 	void _on_async_texture_readback(const RID &p_texture, uint32_t p_layer, const PackedByteArray &p_data,

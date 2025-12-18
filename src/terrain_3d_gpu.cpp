@@ -20,6 +20,7 @@
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/time.hpp>
 
+#include "terrain_3d_gpu.h"
 #include "logger.h"
 #include "terrain_3d_data.h"
 
@@ -97,6 +98,21 @@ struct HeightBrushPushConstant {
 	int32_t use_alt = 0;
 	float padding[4] = { 0.f, 0.f, 0.f, 0.f };
 };
+
+static bool _aabb_has_extent(const AABB &p_box) {
+	return p_box.size.x > 0.f || p_box.size.y > 0.f || p_box.size.z > 0.f;
+}
+
+static void _merge_aabb_safe(AABB &r_base, const AABB &p_other) {
+	if (!_aabb_has_extent(p_other)) {
+		return;
+	}
+	if (!_aabb_has_extent(r_base)) {
+		r_base = p_other;
+	} else {
+		r_base = r_base.merge(p_other);
+	}
+}
 
 } // namespace
 
@@ -1007,6 +1023,7 @@ void Terrain3DGpuWorkflow::finalize_preview() {
 		// id and pending_readbacks set later when processing
 		_deferred_finalizations.push_back(std::move(brush));
 	}
+	_coalesce_brush_queue(_deferred_finalizations);
 
 	// Kick the readback processing loop (it will process a small batch).
 	if (_data) {
@@ -1028,6 +1045,7 @@ void Terrain3DGpuWorkflow::finalize_preview_blocking() {
 		brush.generate_color_mipmaps = (req.map_type == TYPE_COLOR);
 		_deferred_finalizations.push_back(std::move(brush));
 	}
+	_coalesce_brush_queue(_deferred_finalizations);
 
 	while (!_deferred_finalizations.empty()) {
 		PendingBrush brush = std::move(_deferred_finalizations.front());
@@ -1098,6 +1116,61 @@ void Terrain3DGpuWorkflow::_notify_idle_if_needed() {
 
 void Terrain3DGpuWorkflow::set_preview_mode(bool p_enabled) {
 	_preview_mode = p_enabled;
+}
+
+void Terrain3DGpuWorkflow::_coalesce_brush_queue(std::deque<PendingBrush> &p_queue) {
+	if (p_queue.size() <= 1) {
+		return;
+	}
+	struct BrushAccumulator {
+		PendingBrush brush;
+		std::unordered_map<Vector2i, Terrain3DGpuBrushRegion, Vector2iHash> regions;
+	};
+	std::vector<BrushAccumulator> accumulators;
+	accumulators.reserve(p_queue.size());
+	std::unordered_map<int, size_t> type_to_index;
+	while (!p_queue.empty()) {
+		PendingBrush brush = std::move(p_queue.front());
+		p_queue.pop_front();
+		if (brush.map_type == TYPE_MAX || brush.regions.empty()) {
+			continue;
+		}
+		const int key = static_cast<int>(brush.map_type);
+		size_t idx;
+		auto it = type_to_index.find(key);
+		if (it == type_to_index.end()) {
+			idx = accumulators.size();
+			type_to_index[key] = idx;
+			accumulators.push_back(BrushAccumulator());
+			accumulators[idx].brush.map_type = brush.map_type;
+		} else {
+			idx = it->second;
+		}
+		BrushAccumulator &acc = accumulators[idx];
+		acc.brush.generate_color_mipmaps = acc.brush.generate_color_mipmaps || brush.generate_color_mipmaps;
+		acc.brush.update_instancer = acc.brush.update_instancer || brush.update_instancer;
+		acc.brush.update_collision = acc.brush.update_collision || brush.update_collision;
+		_merge_aabb_safe(acc.brush.edited_area, brush.edited_area);
+		for (const Terrain3DGpuBrushRegion &region_info : brush.regions) {
+			if (region_info.region.is_null()) {
+				continue;
+			}
+			acc.regions[region_info.location] = region_info;
+		}
+	}
+	for (BrushAccumulator &acc : accumulators) {
+		if (acc.regions.empty()) {
+			continue;
+		}
+		acc.brush.regions.clear();
+		acc.brush.regions.reserve(acc.regions.size());
+		for (auto &region_pair : acc.regions) {
+			acc.brush.regions.push_back(region_pair.second);
+		}
+		acc.brush.id = 0;
+		acc.brush.pending_readbacks = 0;
+		p_queue.push_back(std::move(acc.brush));
+	}
 }
 
 void Terrain3DGpuWorkflow::_enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps) {
