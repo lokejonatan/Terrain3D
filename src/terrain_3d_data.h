@@ -105,6 +105,9 @@ private:
 	TypedArray<Image> _get_layered_images(MapType p_map_type) const;
 	RenderingDevice::DataFormat _get_rd_format(MapType p_map_type) const;
 	void _notify_gpu_maps_synced(MapType p_map_type);
+	struct SaveProfileStats;
+	void _save_region_internal(const Ref<Terrain3DRegion> &p_region, const Vector2i &p_region_loc,
+		const String &p_dir, bool p_16_bit, bool p_finalize_preview, SaveProfileStats *p_stats = nullptr);
 
 public:
 	Terrain3DData() {}

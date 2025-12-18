@@ -10,6 +10,7 @@
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
 #include <godot_cpp/classes/texture2d_array_rd.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/core/memory.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
@@ -41,7 +42,27 @@ static Ref<Image> _ensure_image_for_upload(const Ref<Image> &p_image, const Vect
 	return img;
 }
 
+static uint64_t _get_ticks_usec() {
+	Time *time = Time::get_singleton();
+	return time ? time->get_ticks_usec() : 0;
+}
+
+static double _usec_to_msec(uint64_t p_usecs) {
+	return double(p_usecs) * 0.001;
+}
+
 } // namespace
+
+struct Terrain3DData::SaveProfileStats {
+	uint64_t total_us = 0;
+	uint64_t finalize_us = 0;
+	uint64_t write_us = 0;
+	uint64_t delete_us = 0;
+	int saved = 0;
+	int deleted = 0;
+	int skipped = 0;
+	int failed = 0;
+};
 
 void Terrain3DData::_clear_generated_texture(MapType p_map_type) {
 	switch (p_map_type) {
@@ -703,39 +724,96 @@ void Terrain3DData::remove_region(const Ref<Terrain3DRegion> &p_region, const bo
 
 void Terrain3DData::save_directory(const String &p_dir) {
 	LOG(INFO, "Saving data files to ", p_dir);
-	// Ensure any GPU-only previews are committed before saving.
+	SaveProfileStats stats;
+	const uint64_t directory_start = _get_ticks_usec();
+	bool finalize_per_region = true;
 	if (_gpu_workflow) {
+		const uint64_t finalize_start = _get_ticks_usec();
 		_gpu_workflow->finalize_preview_blocking();
+		const uint64_t finalize_end = _get_ticks_usec();
+		stats.finalize_us += finalize_end - finalize_start;
+		finalize_per_region = false;
 	}
+	const bool save_16_bit = _terrain ? _terrain->get_save_16_bit() : false;
 	Array locations = _regions.keys();
 	for (const Vector2i &region_loc : locations) {
-		save_region(region_loc, p_dir, _terrain->get_save_16_bit());
+		Ref<Terrain3DRegion> region = get_region(region_loc);
+		if (region.is_null()) {
+			continue;
+		}
+		_save_region_internal(region, region_loc, p_dir, save_16_bit, finalize_per_region, &stats);
 	}
+	const uint64_t directory_elapsed = _get_ticks_usec() - directory_start;
 	if (IS_EDITOR && !EditorInterface::get_singleton()->get_resource_filesystem()->is_scanning()) {
 		EditorInterface::get_singleton()->get_resource_filesystem()->scan();
 	}
+	int processed = stats.saved + stats.deleted + stats.failed;
+	if (processed == 0) {
+		LOG(INFO, "Save skipped: no modified regions detected");
+		return;
+	}
+	LOG(INFO, "Save summary: processed ", processed, " region(s) (saved=", stats.saved,
+		", deleted=", stats.deleted, ", skipped=", stats.skipped, ", failed=", stats.failed,
+		") total=", vformat("%.2f", _usec_to_msec(directory_elapsed)), " ms (region work=",
+		vformat("%.2f", _usec_to_msec(stats.total_us)), " ms, finalize=",
+		vformat("%.2f", _usec_to_msec(stats.finalize_us)), " ms, write=",
+		vformat("%.2f", _usec_to_msec(stats.write_us)), " ms, delete=",
+		vformat("%.2f", _usec_to_msec(stats.delete_us)), " ms)");
 }
 
 // You may need to do a file system scan to update FileSystem panel
+
 void Terrain3DData::save_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_16_bit) {
-	Ref<Terrain3DRegion> region = get_region(p_region_loc);
+	_save_region_internal(Ref<Terrain3DRegion>(), p_region_loc, p_dir, p_16_bit, true);
+}
+
+void Terrain3DData::_save_region_internal(const Ref<Terrain3DRegion> &p_region, const Vector2i &p_region_loc,
+		const String &p_dir, bool p_16_bit, bool p_finalize_preview, SaveProfileStats *p_stats) {
+	Ref<Terrain3DRegion> region = p_region;
+	if (region.is_null()) {
+		region = get_region(p_region_loc);
+	}
 	if (region.is_null()) {
 		LOG(ERROR, "No region found at: ", p_region_loc);
 		return;
 	}
-	// Ensure any GPU-only previews are committed before saving this region.
-	if (_gpu_workflow) {
-		_gpu_workflow->finalize_preview_blocking();
-	}
 	String fname = Util::location_to_filename(p_region_loc);
 	String path = p_dir + String("/") + fname;
-	// If region marked for deletion, remove from disk and from _regions, but don't free in case stored in undo
+	const uint64_t region_start = _get_ticks_usec();
+	uint64_t finalize_duration = 0;
+	auto accumulate_totals = [&](uint64_t p_end_time) {
+		if (!p_stats || region_start == 0) {
+			return;
+		}
+		p_stats->finalize_us += finalize_duration;
+		if (p_end_time >= region_start) {
+			p_stats->total_us += p_end_time - region_start;
+		}
+	};
+	if (!region->is_deleted() && !region->is_modified()) {
+		LOG(DEBUG, "Region ", p_region_loc, " not modified. Skipping ", path);
+		if (p_stats) {
+			p_stats->skipped++;
+		}
+		accumulate_totals(_get_ticks_usec());
+		return;
+	}
+	if (_gpu_workflow && p_finalize_preview && !region->is_deleted()) {
+		const uint64_t finalize_start = _get_ticks_usec();
+		_gpu_workflow->finalize_preview_blocking();
+		const uint64_t finalize_end = _get_ticks_usec();
+		finalize_duration = finalize_end - finalize_start;
+	}
 	if (region->is_deleted()) {
 		LOG(DEBUG, "Removing ", p_region_loc, " from _regions");
 		_regions.erase(p_region_loc);
 		LOG(DEBUG, "File to be deleted: ", path);
 		if (!FileAccess::file_exists(path)) {
 			LOG(INFO, "File to delete ", path, " doesn't exist. (Maybe from add, undo, save)");
+			if (p_stats) {
+				p_stats->deleted++;
+			}
+			accumulate_totals(_get_ticks_usec());
 			return;
 		}
 		Ref<DirAccess> da = DirAccess::open(p_dir);
@@ -743,17 +821,40 @@ void Terrain3DData::save_region(const Vector2i &p_region_loc, const String &p_di
 			LOG(ERROR, "Cannot open directory for writing: ", p_dir, " error: ", DirAccess::get_open_error());
 			return;
 		}
+		const uint64_t delete_start = _get_ticks_usec();
 		Error err = da->remove(fname);
 		if (err != OK) {
 			LOG(ERROR, "Could not remove file: ", fname, ", error code: ", err);
 		}
 		LOG(INFO, "File ", path, " deleted");
+		const uint64_t delete_end = _get_ticks_usec();
+		if (p_stats) {
+			p_stats->deleted++;
+			p_stats->delete_us += delete_end - delete_start;
+		}
+		accumulate_totals(delete_end);
 		return;
 	}
+	const uint64_t save_start = _get_ticks_usec();
 	Error err = region->save(path, p_16_bit);
+	const uint64_t save_end = _get_ticks_usec();
 	if (!(err == OK || err == ERR_SKIP)) {
 		LOG(ERROR, "Could not save file: ", path, ", error: ", UtilityFunctions::error_string(err), " (", err, ")");
 	}
+	if (p_stats) {
+		p_stats->write_us += save_end - save_start;
+		if (err == OK) {
+			p_stats->saved++;
+		} else if (err == ERR_SKIP) {
+			p_stats->skipped++;
+		} else {
+			p_stats->failed++;
+		}
+	}
+	LOG(DEBUG, "Saved region ", p_region_loc, " in ", vformat("%.2f", _usec_to_msec(save_end - region_start)),
+		" ms (finalize=", vformat("%.2f", _usec_to_msec(finalize_duration)),
+		" ms, write=", vformat("%.2f", _usec_to_msec(save_end - save_start)), " ms)");
+	accumulate_totals(save_end);
 }
 
 void Terrain3DData::load_directory(const String &p_dir) {
