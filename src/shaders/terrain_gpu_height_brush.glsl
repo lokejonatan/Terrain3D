@@ -4,6 +4,10 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(r32f, set = 0, binding = 0) uniform image2D height_map;
 layout(r32f, set = 0, binding = 1) uniform readonly image2D brush_mask;
+layout(r32f, set = 0, binding = 2) uniform readonly image2D neighbor_west;
+layout(r32f, set = 0, binding = 3) uniform readonly image2D neighbor_east;
+layout(r32f, set = 0, binding = 4) uniform readonly image2D neighbor_north;
+layout(r32f, set = 0, binding = 5) uniform readonly image2D neighbor_south;
 
 layout(push_constant, std430) uniform HeightBrushParams {
 	ivec2 target_origin;
@@ -21,6 +25,10 @@ layout(push_constant, std430) uniform HeightBrushParams {
 	float cursor_height;
 	int height_mode;
 	int use_alt;
+	int has_west;
+	int has_east;
+	int has_north;
+	int has_south;
 	vec4 padding; // Keep layout aligned with HeightBrushPushConstant in C++
 } params;
 
@@ -73,6 +81,32 @@ float apply_height(float src, float influence) {
 
 float sample_height_clamped(ivec2 coord) {
 	ivec2 max_coord = params.texture_size - ivec2(1);
+	if (coord.x < 0) {
+		if (params.has_west != 0) {
+			ivec2 ncoord = ivec2(coord.x + params.texture_size.x, clamp(coord.y, 0, max_coord.y));
+			return imageLoad(neighbor_west, ncoord).r;
+		}
+		coord.x = 0;
+	} else if (coord.x > max_coord.x) {
+		if (params.has_east != 0) {
+			ivec2 ncoord = ivec2(coord.x - params.texture_size.x, clamp(coord.y, 0, max_coord.y));
+			return imageLoad(neighbor_east, ncoord).r;
+		}
+		coord.x = max_coord.x;
+	}
+	if (coord.y < 0) {
+		if (params.has_north != 0) {
+			ivec2 ncoord = ivec2(clamp(coord.x, 0, max_coord.x), coord.y + params.texture_size.y);
+			return imageLoad(neighbor_north, ncoord).r;
+		}
+		coord.y = 0;
+	} else if (coord.y > max_coord.y) {
+		if (params.has_south != 0) {
+			ivec2 ncoord = ivec2(clamp(coord.x, 0, max_coord.x), coord.y - params.texture_size.y);
+			return imageLoad(neighbor_south, ncoord).r;
+		}
+		coord.y = max_coord.y;
+	}
 	ivec2 clamped = clamp(coord, ivec2(0), max_coord);
 	return imageLoad(height_map, clamped).r;
 }

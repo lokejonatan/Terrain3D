@@ -112,6 +112,7 @@ private:
 		bool update_instancer = false;
 		bool update_collision = false;
 		bool generate_color_mipmaps = false;
+		Terrain3DGpuHeightMode height_mode = Terrain3DGpuHeightMode::RAISE;
 		int64_t id = 0;
 		int pending_readbacks = 0;
 	};
@@ -161,6 +162,8 @@ private:
 	void _enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps);
 	void _finalize_brush_readback(const PendingBrush &p_brush);
 	void _coalesce_brush_queue(std::deque<PendingBrush> &p_queue);
+	void _equalize_smooth_edges(const PendingBrush &p_brush);
+	bool _refresh_height_texture(const Terrain3DGpuBrushRegion &p_region_info);
 	bool _upload_region_to_material(MapType p_map_type, const Terrain3DGpuBrushRegion &p_region_info, const RegionGpuState &p_state);
 	void _apply_readback_data(MapType p_map_type, const PackedByteArray &p_data, const Ref<Terrain3DRegion> &p_region, const Vector2i &p_size);
 	void _on_async_texture_readback(const RID &p_texture, uint32_t p_layer, const PackedByteArray &p_data,

@@ -20,6 +20,8 @@
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/time.hpp>
 
+#include <unordered_set>
+
 #include "terrain_3d_gpu.h"
 #include "logger.h"
 #include "terrain_3d_data.h"
@@ -96,7 +98,26 @@ struct HeightBrushPushConstant {
 	float cursor_height = 0.f;
 	int32_t height_mode = 0;
 	int32_t use_alt = 0;
+	int32_t has_west = 0;
+	int32_t has_east = 0;
+	int32_t has_north = 0;
+	int32_t has_south = 0;
 	float padding[4] = { 0.f, 0.f, 0.f, 0.f };
+};
+
+class RidAutoFree {
+public:
+	RidAutoFree(RenderingDevice *p_rd, const RID &p_rid) : _rd(p_rd), _rid(p_rid) {}
+	~RidAutoFree() {
+		if (_rd && _rid.is_valid()) {
+			_rd->free_rid(_rid);
+		}
+	}
+	void dismiss() { _rid = RID(); }
+
+private:
+	RenderingDevice *_rd = nullptr;
+	RID _rid;
 };
 
 static bool _aabb_has_extent(const AABB &p_box) {
@@ -112,6 +133,54 @@ static void _merge_aabb_safe(AABB &r_base, const AABB &p_other) {
 	} else {
 		r_base = r_base.merge(p_other);
 	}
+}
+
+static bool _average_vertical_edge(const Ref<Image> &p_west, const Ref<Image> &p_east) {
+	if (p_west.is_null() || p_east.is_null()) {
+		return false;
+	}
+	int height = Math::min(p_west->get_height(), p_east->get_height());
+	int west_x = p_west->get_width() - 1;
+	if (height <= 0 || west_x < 0 || p_east->get_width() <= 0) {
+		return false;
+	}
+	bool modified = false;
+	for (int y = 0; y < height; y++) {
+		float west_height = p_west->get_pixel(west_x, y).r;
+		float east_height = p_east->get_pixel(0, y).r;
+		float average = 0.5f * (west_height + east_height);
+		if (!Math::is_equal_approx(average, west_height) || !Math::is_equal_approx(average, east_height)) {
+			Color col = Color(average, 0.f, 0.f, 1.f);
+			p_west->set_pixel(west_x, y, col);
+			p_east->set_pixel(0, y, col);
+			modified = true;
+		}
+	}
+	return modified;
+}
+
+static bool _average_horizontal_edge(const Ref<Image> &p_north, const Ref<Image> &p_south) {
+	if (p_north.is_null() || p_south.is_null()) {
+		return false;
+	}
+	int width = Math::min(p_north->get_width(), p_south->get_width());
+	int north_y = p_north->get_height() - 1;
+	if (width <= 0 || north_y < 0 || p_south->get_height() <= 0) {
+		return false;
+	}
+	bool modified = false;
+	for (int x = 0; x < width; x++) {
+		float north_height = p_north->get_pixel(x, north_y).r;
+		float south_height = p_south->get_pixel(x, 0).r;
+		float average = 0.5f * (north_height + south_height);
+		if (!Math::is_equal_approx(average, north_height) || !Math::is_equal_approx(average, south_height)) {
+			Color col = Color(average, 0.f, 0.f, 1.f);
+			p_north->set_pixel(x, north_y, col);
+			p_south->set_pixel(x, 0, col);
+			modified = true;
+		}
+	}
+	return modified;
 }
 
 } // namespace
@@ -807,6 +876,7 @@ bool Terrain3DGpuWorkflow::_dispatch_color_brush(const Terrain3DGpuBrushRequest 
 		LOG(ERROR, "Failed to create uniform set for GPU brush");
 		return false;
 	}
+	RidAutoFree uniform_guard(_rd, uniform_set);
 
 	ColorBrushPushConstant push;
 	push.target_origin_x = target_rect.position.x;
@@ -843,7 +913,6 @@ bool Terrain3DGpuWorkflow::_dispatch_color_brush(const Terrain3DGpuBrushRequest 
 	uint32_t group_y = (target_rect.size.y + 7) / 8;
 	_rd->compute_list_dispatch(compute_list, group_x, group_y, 1);
 	_rd->compute_list_end();
-	_rd->free_rid(uniform_set);
 	return true;
 }
 
@@ -877,14 +946,50 @@ bool Terrain3DGpuWorkflow::_dispatch_height_brush(const Terrain3DGpuBrushRequest
 	mask_uniform->set_binding(1);
 	mask_uniform->add_id(p_mask_texture);
 
+	RID neighbor_textures[4] = { p_state.height_texture, p_state.height_texture, p_state.height_texture, p_state.height_texture };
+	int neighbor_flags[4] = { 0, 0, 0, 0 };
+	if (_data) {
+		static const Vector2i neighbor_offsets[4] = {
+			Vector2i(-1, 0), // west
+			Vector2i(1, 0), // east
+			Vector2i(0, -1), // north
+			Vector2i(0, 1) // south
+		};
+		for (int i = 0; i < 4; i++) {
+			Vector2i neighbor_loc = p_region_info.location + neighbor_offsets[i];
+			Terrain3DRegion *neighbor_region = _data->get_region_ptr(neighbor_loc);
+			if (!neighbor_region || neighbor_region->is_deleted()) {
+				continue;
+			}
+			RegionGpuState &neighbor_state = _get_or_create_region_state(neighbor_loc, neighbor_region, TYPE_HEIGHT);
+			if (!neighbor_state.height_texture.is_valid()) {
+				continue;
+			}
+			neighbor_textures[i] = neighbor_state.height_texture;
+			neighbor_flags[i] = 1;
+		}
+	}
+
+	Ref<RDUniform> neighbor_uniforms[4];
+	for (int i = 0; i < 4; i++) {
+		neighbor_uniforms[i].instantiate();
+		neighbor_uniforms[i]->set_uniform_type(RenderingDevice::UNIFORM_TYPE_IMAGE);
+		neighbor_uniforms[i]->set_binding(2 + i);
+		neighbor_uniforms[i]->add_id(neighbor_textures[i]);
+	}
+
 	TypedArray<Ref<RDUniform>> uniforms;
 	uniforms.push_back(map_uniform);
 	uniforms.push_back(mask_uniform);
+	for (int i = 0; i < 4; i++) {
+		uniforms.push_back(neighbor_uniforms[i]);
+	}
 	RID uniform_set = _rd->uniform_set_create(uniforms, _height_shader, 0);
 	if (!uniform_set.is_valid()) {
 		LOG(ERROR, "Failed to create uniform set for GPU height brush");
 		return false;
 	}
+	RidAutoFree uniform_guard(_rd, uniform_set);
 
 	HeightBrushPushConstant push;
 	push.target_origin_x = target_rect.position.x;
@@ -907,6 +1012,10 @@ bool Terrain3DGpuWorkflow::_dispatch_height_brush(const Terrain3DGpuBrushRequest
 	push.cursor_height = p_request.cursor_height;
 	push.height_mode = static_cast<int32_t>(p_request.height_mode);
 	push.use_alt = p_request.height_use_alt ? 1 : 0;
+	push.has_west = neighbor_flags[0];
+	push.has_east = neighbor_flags[1];
+	push.has_north = neighbor_flags[2];
+	push.has_south = neighbor_flags[3];
 
 	PackedByteArray push_bytes;
 	push_bytes.resize(sizeof(HeightBrushPushConstant));
@@ -920,7 +1029,6 @@ bool Terrain3DGpuWorkflow::_dispatch_height_brush(const Terrain3DGpuBrushRequest
 	uint32_t group_y = (target_rect.size.y + 7) / 8;
 	_rd->compute_list_dispatch(compute_list, group_x, group_y, 1);
 	_rd->compute_list_end();
-	_rd->free_rid(uniform_set);
 	return true;
 }
 
@@ -1020,6 +1128,7 @@ void Terrain3DGpuWorkflow::finalize_preview() {
 		brush.update_instancer = req.update_instancer;
 		brush.update_collision = req.update_collision;
 		brush.generate_color_mipmaps = (req.map_type == TYPE_COLOR);
+		brush.height_mode = req.height_mode;
 		// id and pending_readbacks set later when processing
 		_deferred_finalizations.push_back(std::move(brush));
 	}
@@ -1043,6 +1152,7 @@ void Terrain3DGpuWorkflow::finalize_preview_blocking() {
 		brush.update_instancer = req.update_instancer;
 		brush.update_collision = req.update_collision;
 		brush.generate_color_mipmaps = (req.map_type == TYPE_COLOR);
+		brush.height_mode = req.height_mode;
 		_deferred_finalizations.push_back(std::move(brush));
 	}
 	_coalesce_brush_queue(_deferred_finalizations);
@@ -1173,6 +1283,119 @@ void Terrain3DGpuWorkflow::_coalesce_brush_queue(std::deque<PendingBrush> &p_que
 	}
 }
 
+bool Terrain3DGpuWorkflow::_refresh_height_texture(const Terrain3DGpuBrushRegion &p_region_info) {
+	if (!_rd || p_region_info.region.is_null()) {
+		return false;
+	}
+	RegionGpuState &state = _get_or_create_region_state(p_region_info.location, p_region_info.region.ptr(), TYPE_HEIGHT);
+	Ref<Image> img = p_region_info.region->get_height_map();
+	if (img.is_null()) {
+		p_region_info.region->sanitize_maps();
+		img = p_region_info.region->get_height_map();
+		if (img.is_null()) {
+			return false;
+		}
+	}
+	Ref<Image> upload_image = img;
+	if (upload_image->get_format() != Image::FORMAT_RF) {
+		upload_image = img->duplicate();
+		if (upload_image.is_null()) {
+			return false;
+		}
+		upload_image->convert(Image::FORMAT_RF);
+	}
+	if (upload_image->has_mipmaps()) {
+		upload_image->clear_mipmaps();
+	}
+	PackedByteArray data = upload_image->get_data();
+	if (data.is_empty()) {
+		return false;
+	}
+	if (!state.height_texture.is_valid()) {
+		state.size = upload_image->get_size();
+		state.height_texture = _create_texture_from_image(upload_image, RenderingDevice::DATA_FORMAT_R32_SFLOAT,
+				RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_STORAGE_BIT |
+				RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT);
+		return state.height_texture.is_valid();
+	}
+	Error err = _rd->texture_update(state.height_texture, 0, data);
+	if (err != OK) {
+		LOG(WARN, "Failed to refresh height texture for region ", p_region_info.location, ", err=", err);
+		return false;
+	}
+	return true;
+}
+
+void Terrain3DGpuWorkflow::_equalize_smooth_edges(const PendingBrush &p_brush) {
+	if (p_brush.regions.size() < 2) {
+		return;
+	}
+	std::unordered_map<Vector2i, Terrain3DGpuBrushRegion, Vector2iHash> region_lookup;
+	region_lookup.reserve(p_brush.regions.size());
+	for (const Terrain3DGpuBrushRegion &region_info : p_brush.regions) {
+		if (region_info.region.is_null()) {
+			continue;
+		}
+		region_lookup[region_info.location] = region_info;
+	}
+	if (region_lookup.size() < 2) {
+		return;
+	}
+	std::unordered_set<Vector2i, Vector2iHash> dirty_regions;
+	for (const Terrain3DGpuBrushRegion &region_info : p_brush.regions) {
+		if (region_info.region.is_null()) {
+			continue;
+		}
+		auto blend_with_neighbor = [&](const Vector2i &p_offset) {
+			Vector2i neighbor_loc = region_info.location + p_offset;
+			auto neighbor_it = region_lookup.find(neighbor_loc);
+			if (neighbor_it == region_lookup.end() || neighbor_it->second.region.is_null()) {
+				return;
+			}
+			Ref<Image> primary_img = region_info.region->get_height_map();
+			if (primary_img.is_null()) {
+				region_info.region->sanitize_maps();
+				primary_img = region_info.region->get_height_map();
+			}
+			Ref<Image> neighbor_img = neighbor_it->second.region->get_height_map();
+			if (neighbor_img.is_null()) {
+				neighbor_it->second.region->sanitize_maps();
+				neighbor_img = neighbor_it->second.region->get_height_map();
+			}
+			if (primary_img.is_null() || neighbor_img.is_null()) {
+				return;
+			}
+			bool changed = false;
+			if (p_offset == Vector2i(1, 0)) {
+				changed = _average_vertical_edge(primary_img, neighbor_img);
+			} else if (p_offset == Vector2i(0, 1)) {
+				changed = _average_horizontal_edge(primary_img, neighbor_img);
+			}
+			if (changed) {
+				dirty_regions.insert(region_info.location);
+				dirty_regions.insert(neighbor_loc);
+			}
+		};
+		blend_with_neighbor(Vector2i(1, 0));
+		blend_with_neighbor(Vector2i(0, 1));
+	}
+	if (dirty_regions.empty()) {
+		return;
+	}
+	for (const Vector2i &loc : dirty_regions) {
+		auto info_it = region_lookup.find(loc);
+		if (info_it == region_lookup.end()) {
+			continue;
+		}
+		if (_refresh_height_texture(info_it->second)) {
+			auto state_it = _region_gpu_states.find(loc);
+			if (state_it != _region_gpu_states.end()) {
+				_upload_region_to_material(TYPE_HEIGHT, info_it->second, state_it->second);
+			}
+		}
+	}
+}
+
 void Terrain3DGpuWorkflow::_enqueue_readback_brush(const Terrain3DGpuBrushRequest &p_request, bool p_generate_color_mipmaps) {
 	if (p_request.regions.empty()) {
 		return;
@@ -1184,6 +1407,9 @@ void Terrain3DGpuWorkflow::_enqueue_readback_brush(const Terrain3DGpuBrushReques
 	brush.update_instancer = p_request.update_instancer;
 	brush.update_collision = p_request.update_collision;
 	brush.generate_color_mipmaps = p_generate_color_mipmaps;
+	if (p_request.map_type == TYPE_HEIGHT) {
+		brush.height_mode = p_request.height_mode;
+	}
 	_pending_brushes.push_back(std::move(brush));
 	if (_data) {
 		_data->request_gpu_readback_flush();
@@ -1226,6 +1452,9 @@ void Terrain3DGpuWorkflow::_finalize_brush_readback(const PendingBrush &p_brush)
 			default:
 				break;
 		}
+	}
+	if (p_brush.map_type == TYPE_HEIGHT && p_brush.height_mode == Terrain3DGpuHeightMode::SMOOTH) {
+		_equalize_smooth_edges(p_brush);
 	}
 	switch (p_brush.map_type) {
 		case TYPE_COLOR:
