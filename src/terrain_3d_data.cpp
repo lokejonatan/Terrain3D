@@ -782,7 +782,7 @@ void Terrain3DData::_save_region_internal(const Ref<Terrain3DRegion> &p_region, 
 	const uint64_t region_start = _get_ticks_usec();
 	uint64_t finalize_duration = 0;
 	auto accumulate_totals = [&](uint64_t p_end_time) {
-		if (!p_stats || region_start == 0) {
+		if (!p_stats) {
 			return;
 		}
 		p_stats->finalize_us += finalize_duration;
