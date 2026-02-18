@@ -6,13 +6,7 @@
 #include "constants.h"
 #include "generated_texture.h"
 #include "terrain_3d.h"
-#include "terrain_3d_layer.h"
 #include "terrain_3d_region.h"
-
-#include <godot_cpp/classes/object.hpp>
-
-#include <cstdint>
-#include <vector>
 
 class Terrain3D;
 
@@ -80,33 +74,11 @@ private:
 	GeneratedTexture _generated_control_maps;
 	GeneratedTexture _generated_color_maps;
 
-	uint64_t _next_layer_group_id = 1;
-	
-	// Track external tool layers by external_id -> {region_loc, layer_ref}
-	// Used to find and update existing layers created by external tools
-	Dictionary _external_layers; // Dict[uint64_t external_id] -> Dictionary{"region_loc": Vector2i, "layer": Ref<Terrain3DLayer>, "map_type": MapType}
-
 	// Functions
 	void _clear();
 	void _copy_paste_dfr(const Terrain3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Terrain3DRegion *p_dst_region);
-	bool _find_layer_owner(const Ref<Terrain3DLayer> &p_layer, const MapType p_map_type, Terrain3DRegion **r_region = nullptr, Vector2i *r_region_loc = nullptr, int *r_index = nullptr) const;
-	uint64_t _allocate_layer_group_id();
-	uint64_t _ensure_layer_group_id_internal(const Ref<Terrain3DLayer> &p_layer);
-	void _ensure_region_layer_groups(const Ref<Terrain3DRegion> &p_region);
-	Ref<Terrain3DLayer> _duplicate_layer_template(const Ref<Terrain3DLayer> &p_template) const;
 
 public:
-	uint64_t ensure_layer_group_id(const Ref<Terrain3DLayer> &p_layer);
-	TypedArray<Dictionary> get_layer_groups(const MapType p_map_type);
-
-	struct LayerSplitResult {
-		Vector2i region_location;
-		Rect2i coverage;
-		Ref<Image> payload;
-		Ref<Image> alpha;
-	};
-	typedef std::vector<LayerSplitResult> LayerSplitResults;
-
 	Terrain3DData() {}
 	void initialize(Terrain3D *p_terrain);
 	~Terrain3DData() { _clear(); }
@@ -160,30 +132,6 @@ public:
 	TypedArray<Image> get_color_maps() const { return _color_maps; }
 	TypedArray<Image> get_maps(const MapType p_map_type) const;
 	void update_maps(const MapType p_map_type = TYPE_MAX, const bool p_all_regions = true, const bool p_generate_mipmaps = false);
-	TypedArray<Terrain3DLayer> get_layers(const Vector2i &p_region_loc, const MapType p_map_type) const;
-	Ref<Terrain3DLayer> add_layer(const Vector2i &p_region_loc, const MapType p_map_type, const Ref<Terrain3DLayer> &p_layer, const int p_index = -1, const bool p_update = true);
-	Ref<Terrain3DStampLayer> add_stamp_layer(const Vector2i &p_region_loc, const MapType p_map_type, const Ref<Image> &p_payload, const Rect2i &p_coverage, const Ref<Image> &p_alpha = Ref<Image>(), const real_t p_intensity = 1.0f, const real_t p_feather_radius = 0.0f, const Terrain3DLayer::BlendMode p_blend_mode = Terrain3DLayer::BLEND_ADD, const int p_index = -1, const bool p_update = true);
-	TypedArray<Terrain3DStampLayer> add_stamp_layer_global(const Rect2i &p_global_coverage, const MapType p_map_type, const Ref<Image> &p_payload, const Ref<Image> &p_alpha = Ref<Image>(), const real_t p_intensity = 1.0f, const real_t p_feather_radius = 0.0f, const Terrain3DLayer::BlendMode p_blend_mode = Terrain3DLayer::BLEND_ADD, const bool p_auto_create_regions = true, const bool p_update = true);
-	LayerSplitResults split_layer_payload_global(const Rect2i &p_global_coverage, const Ref<Image> &p_payload, const Ref<Image> &p_alpha = Ref<Image>()) const;
-	TypedArray<Dictionary> split_layer_payload_global_data(const Rect2i &p_global_coverage, const Ref<Image> &p_payload, const Ref<Image> &p_alpha = Ref<Image>()) const;
-	Dictionary get_layer_owner_info(const Ref<Terrain3DLayer> &p_layer, const MapType p_map_type) const;
-	bool set_layer_coverage(const Vector2i &p_region_loc, const MapType p_map_type, const int p_index, const Rect2i &p_coverage, const bool p_update = true);
-	bool move_stamp_layer(const Ref<Terrain3DStampLayer> &p_layer, const Vector3 &p_world_position, const bool p_update = true);
-	void set_layer_enabled(const Vector2i &p_region_loc, const MapType p_map_type, const int p_index, const bool p_enabled, const bool p_update = true);
-	void remove_layer(const Vector2i &p_region_loc, const MapType p_map_type, const int p_index, const bool p_update = true);
-	Ref<Terrain3DLayer> get_layer_in_group(const Vector2i &p_region_loc, const MapType p_map_type, const uint64_t p_group_id, int *r_index = nullptr);
-	Ref<Terrain3DLayer> create_layer_group_slice(const Vector2i &p_region_loc, const MapType p_map_type, const uint64_t p_group_id, const Ref<Terrain3DLayer> &p_template_layer, const bool p_update = true);
-	
-	// External tool integration - non-destructive layer writing
-	// Primary entry point for procedural tools (like funofabot's terrain3d-tools) to commit their final results
-	// to the non-destructive layer stack. Similar to set_map() but writes to a layer instead of
-	// absolute override. Creates or updates a non-user-editable layer that can only be modified
-	// by external tools, preventing accidental edits from the Terrain3D editor.
-	// Thread-safe: Uses atomic-safe dirty flag updates for background thread compatibility.
-	Ref<Terrain3DStampLayer> set_map_layer(const Vector2i &p_region_loc, const MapType p_map_type, const Ref<Image> &p_image, const uint64_t p_external_id = 0, const bool p_update = true);
-	// Allows external tools to drop or recycle tracked layer IDs before creating new map layers.
-	bool release_map_layer(const uint64_t p_external_id, const bool p_remove_layer = true, const bool p_update = true);
-	
 	RID get_height_maps_rid() const { return _generated_height_maps.get_rid(); }
 	RID get_control_maps_rid() const { return _generated_control_maps.get_rid(); }
 	RID get_color_maps_rid() const { return _generated_color_maps.get_rid(); }
@@ -235,6 +183,12 @@ public:
 			const real_t p_offset = 0.f, const real_t p_scale = 1.f);
 	Error export_image(const String &p_file_name, const MapType p_map_type = TYPE_HEIGHT) const;
 	Ref<Image> layered_to_image(const MapType p_map_type) const;
+
+	// Persistent NDE Override System
+	// Sets override maps for a region. Override maps take priority over base maps in rendering.
+	// Pass null/invalid images to clear overrides and revert to base maps.
+	// Automatically marks the region as modified and triggers texture array updates.
+	void set_region_override(const Vector2i &p_region_loc, const Ref<Image> &p_height, const Ref<Image> &p_control, const Ref<Image> &p_color);
 
 	// Utility
 	void dump(const bool verbose = false) const;

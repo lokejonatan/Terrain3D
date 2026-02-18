@@ -136,10 +136,6 @@ func set_visible(p_visible: bool, p_menu_only: bool = false) -> void:
 		visible = p_visible
 		toolbar.set_visible(p_visible)
 		tool_settings.set_visible(p_visible)
-		if p_visible:
-			update_layer_panel()
-		else:
-			tool_settings.clear_layer_stack()
 
 	if plugin.editor:
 		if p_visible:
@@ -186,7 +182,7 @@ func _on_tool_changed(p_tool: Terrain3DEditor.Tool, p_operation: Terrain3DEditor
 			to_show.push_back("size")
 			to_show.push_back("strength")
 			if _selected_operation in [Terrain3DEditor.ADD, Terrain3DEditor.SUBTRACT]:
-				to_show.push_back("invert")
+					to_show.push_back("invert")
 			elif _selected_operation == Terrain3DEditor.GRADIENT:
 				to_show.push_back("gradient_points")
 				to_show.push_back("drawable")
@@ -284,69 +280,6 @@ func _on_tool_changed(p_tool: Terrain3DEditor.Tool, p_operation: Terrain3DEditor
 		print("Terrain3DUI: _on_tool_changed: calling _on_setting_changed()")
 	_on_setting_changed()
 	plugin.update_region_grid()
-	update_layer_panel()
-
-
-func update_layer_panel() -> void:
-	if not plugin or not plugin.terrain or not tool_settings:
-		return
-	var data: Terrain3DData = plugin.terrain.data
-	if data == null:
-		tool_settings.clear_layer_stack()
-		return
-	var map_type: int = Terrain3DRegion.TYPE_MAX
-	if plugin.editor:
-		map_type = _map_type_for_tool(plugin.editor.get_tool())
-	if map_type == Terrain3DRegion.TYPE_MAX:
-		tool_settings.clear_layer_stack()
-		return
-	var default_region := data.get_region_location(plugin.mouse_global_position)
-	var layer_entries := _collect_global_layers(data, map_type, default_region)
-	tool_settings.update_layer_stack(default_region, map_type, layer_entries)
-
-func _collect_global_layers(data: Terrain3DData, map_type: int, default_region: Vector2i) -> Array:
-	var entries: Array = []
-	if data == null:
-		return entries
-	var groups: Array = data.get_layer_groups(map_type) if data.has_method("get_layer_groups") else []
-	if groups.is_empty():
-		return entries
-	for group_dict in groups:
-		var slices: Array = group_dict.get("layers", [])
-		if slices.is_empty():
-			continue
-		var primary_slice: Dictionary = {}
-		var layer_ref: Terrain3DLayer = null
-		for slice in slices:
-			var layer_candidate: Terrain3DLayer = slice.get("layer")
-			if layer_candidate and layer_ref == null:
-				layer_ref = layer_candidate
-			if primary_slice.is_empty():
-				primary_slice = slice
-			if slice.get("region_location", Vector2i.ZERO) == default_region:
-				primary_slice = slice
-				break
-		if primary_slice.is_empty():
-			continue
-		var unique_regions := {}
-		for slice in slices:
-			var loc: Vector2i = slice.get("region_location", Vector2i.ZERO)
-			unique_regions[str(loc)] = loc
-		var editable := true
-		if layer_ref and layer_ref.has_method("is_user_editable"):
-			editable = layer_ref.is_user_editable()
-		var entry := {
-			"group_id": group_dict.get("group_id", 0),
-			"map_type": map_type,
-			"layer": primary_slice.get("layer"),
-			"layers": slices,
-			"region_location": primary_slice.get("region_location", Vector2i.ZERO),
-			"layer_index": primary_slice.get("layer_index", -1),
-			"region_count": unique_regions.size(),
-			"user_editable": editable
-		}
-		entries.append(entry)
-	return entries
 
 
 func _on_setting_changed(p_setting: Variant = null) -> void:
@@ -716,15 +649,3 @@ func pick(p_global_position: Vector3) -> void:
 
 func set_button_editor_icon(p_button: Button, p_icon_name: String) -> void:
 	p_button.icon = EditorInterface.get_base_control().get_theme_icon(p_icon_name, "EditorIcons")
-
-
-func _map_type_for_tool(p_tool: int) -> int:
-	match p_tool:
-		Terrain3DEditor.SCULPT, Terrain3DEditor.HEIGHT, Terrain3DEditor.INSTANCER:
-			return Terrain3DRegion.TYPE_HEIGHT
-		Terrain3DEditor.TEXTURE, Terrain3DEditor.AUTOSHADER, Terrain3DEditor.HOLES, Terrain3DEditor.NAVIGATION, Terrain3DEditor.ANGLE, Terrain3DEditor.SCALE:
-			return Terrain3DRegion.TYPE_CONTROL
-		Terrain3DEditor.COLOR, Terrain3DEditor.ROUGHNESS:
-			return Terrain3DRegion.TYPE_COLOR
-		_:
-			return Terrain3DRegion.TYPE_MAX

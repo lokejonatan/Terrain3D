@@ -13,7 +13,6 @@
 #include <godot_cpp/classes/surface_tool.hpp>
 #include <godot_cpp/classes/viewport_texture.hpp>
 #include <godot_cpp/classes/world3d.hpp>
-#include <godot_cpp/core/math.hpp>
 
 #include "logger.h"
 #include "terrain_3d.h"
@@ -76,11 +75,11 @@ void Terrain3D::_initialize() {
 		LOG(DEBUG, "Connecting _data::height_maps_changed signal to update_aabbs()");
 		_data->connect("height_maps_changed", callable_mp(this, &Terrain3D::_update_mesher_aabbs));
 	}
-	// // Texture assets changed, update material
-	// if (!_assets->is_connected("textures_changed", callable_mp(_material.ptr(), &Terrain3DMaterial::_update_texture_arrays))) {
-	// 	LOG(DEBUG, "Connecting _assets.textures_changed to _material->_update_texture_arrays()");
-	// 	_assets->connect("textures_changed", callable_mp(_material.ptr(), &Terrain3DMaterial::_update_texture_arrays));
-	// }
+	// Texture assets changed, update material uniforms without rebuilding shaders
+	if (!_assets->is_connected("textures_changed", callable_mp(_material.ptr(), &Terrain3DMaterial::update).bind(false))) {
+		LOG(DEBUG, "Connecting _assets.textures_changed to _material->update()");
+		_assets->connect("textures_changed", callable_mp(_material.ptr(), &Terrain3DMaterial::update).bind(false));
+	}
 	// Initialize the system
 	if (!_initialized && _is_inside_world && is_inside_tree()) {
 		LOG(INFO, "Initializing main subsystems");
@@ -108,7 +107,6 @@ void Terrain3D::__physics_process(const double p_delta) {
 		LOG(DEBUG, "Camera is null, getting the current one");
 		_grab_camera();
 	}
-	_process_mesh_snap_request();
 	if (_tessellation_level > 0) {
 		if (_mesher && _d_buffer_vp && _material.is_valid()) {
 			// If clipmap target has moved enough, re-center buffer on the target.
@@ -129,29 +127,6 @@ void Terrain3D::__physics_process(const double p_delta) {
 	if (_collision && _collision->is_dynamic_mode()) {
 		_collision->update();
 	}
-}
-
-void Terrain3D::_process_mesh_snap_request() {
-	if (!_mesh_snap_requested) {
-		return;
-	}
-	_mesh_snap_requested = false;
-	snap_mesh();
-}
-
-void Terrain3D::_update_mesher_aabbs() {
-	if (!_mesher || !_data) {
-		return;
-	}
-	Vector2 height_range = _data->get_height_range();
-	bool has_cached = !Math::is_nan(_last_height_range.x) && !Math::is_nan(_last_height_range.y);
-	if (has_cached &&
-			Math::is_equal_approx(height_range.x, _last_height_range.x) &&
-			Math::is_equal_approx(height_range.y, _last_height_range.y)) {
-		return;
-	}
-	_last_height_range = height_range;
-	_mesher->update_aabbs();
 }
 
 /**
@@ -598,14 +573,6 @@ Vector3 Terrain3D::get_collision_target_position() const {
 }
 
 void Terrain3D::snap() {
-	snap_mesh();
-	if (_collision) {
-		LOG(DEBUG, "Terrain3D::snap resetting collision target");
-		_collision->reset_target_position();
-	}
-}
-
-void Terrain3D::snap_mesh() {
 	if (_mesher) {
 		_mesher->reset_target_position();
 	}
@@ -615,10 +582,6 @@ void Terrain3D::snap_mesh() {
 	if (_tessellation_level > 0) {
 		_last_buffer_position = V2_MAX;
 	}
-}
-
-void Terrain3D::request_mesh_snap() {
-	_mesh_snap_requested = true;
 }
 
 void Terrain3D::set_region_size(const RegionSize p_size) {

@@ -3,25 +3,10 @@
 #ifndef TERRAIN3D_EDITOR_CLASS_H
 #define TERRAIN3D_EDITOR_CLASS_H
 
-#include <cstdint>
-
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
-#include <godot_cpp/classes/object.hpp>
-#include <godot_cpp/classes/ref.hpp>
-#include <godot_cpp/variant/array.hpp>
-#include <godot_cpp/variant/color.hpp>
-#include <godot_cpp/variant/dictionary.hpp>
-#include <godot_cpp/variant/typed_array.hpp>
-#include <godot_cpp/variant/vector2.hpp>
-#include <godot_cpp/variant/vector2i.hpp>
-#include <godot_cpp/variant/vector3.hpp>
 
-#include <utility>
-
-#include "constants.h"
 #include "terrain_3d.h"
-#include "terrain_3d_layer.h"
 #include "terrain_3d_region.h"
 
 class Terrain3DEditor : public Object {
@@ -103,10 +88,6 @@ private:
 	AABB _modified_area;
 	Dictionary _undo_data; // See _get_undo_data for definition
 	uint64_t _last_pen_tick = 0;
-	int _active_layer_index = 0;
-	uint64_t _active_layer_group_id = 0;
-	MapType _active_layer_map_type = TYPE_MAX;
-	Ref<Terrain3DLayer> _active_layer_template;
 
 	void _send_region_aabb(const Vector2i &p_region_loc, const Vector2 &p_height_range = V2_ZERO);
 	Ref<Terrain3DRegion> _operate_region(const Vector2i &p_region_loc);
@@ -139,11 +120,6 @@ public:
 	void operate(const Vector3 &p_global_position, const real_t p_camera_direction);
 	void backup_region(const Ref<Terrain3DRegion> &p_region);
 	void stop_operation();
-	void set_active_layer_index(const int p_index);
-	int get_active_layer_index() const { return _active_layer_index; }
-	int create_layer(const Vector2i &p_region_loc, const MapType p_map_type, const bool p_select = true);
-	void set_active_layer_reference(const Ref<Terrain3DLayer> &p_layer, const MapType p_map_type);
-	uint64_t get_active_layer_group_id() const { return _active_layer_group_id; }
 
 protected:
 	static void _bind_methods();

@@ -6,14 +6,6 @@
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
-#include <godot_cpp/classes/image.hpp>
-#include <godot_cpp/variant/color.hpp>
-#include <godot_cpp/core/math.hpp>
-#include <godot_cpp/variant/array.hpp>
-#include <godot_cpp/variant/dictionary.hpp>
-#include <godot_cpp/variant/rect2i.hpp>
-#include <godot_cpp/variant/typed_array.hpp>
-#include <godot_cpp/variant/vector2i.hpp>
 
 #include "logger.h"
 #include "terrain_3d_data.h"
@@ -33,8 +25,6 @@ void Terrain3DData::_clear() {
 	_generated_height_maps.clear();
 	_generated_control_maps.clear();
 	_generated_color_maps.clear();
-	_next_layer_group_id = 1;
-	_external_layers.clear();
 }
 
 // Structured to work with do_for_regions. Should be renamed when copy_paste is expanded
@@ -51,93 +41,6 @@ void Terrain3DData::_copy_paste_dfr(const Terrain3DRegion *p_src_region, const R
 		}
 	}
 	_terrain->get_instancer()->copy_paste_dfr(p_src_region, p_src_rect, p_dst_region);
-}
-
-bool Terrain3DData::_find_layer_owner(const Ref<Terrain3DLayer> &p_layer, const MapType p_map_type, Terrain3DRegion **r_region, Vector2i *r_region_loc, int *r_index) const {
-	if (p_layer.is_null()) {
-		return false;
-	}
-	Array keys = _regions.keys();
-	for (int i = 0; i < keys.size(); i++) {
-		Vector2i region_loc = keys[i];
-		Terrain3DRegion *region = get_region_ptr(region_loc);
-		if (!region) {
-			continue;
-		}
-		TypedArray<Terrain3DLayer> layers = region->get_layers(p_map_type);
-		for (int j = 0; j < layers.size(); j++) {
-			Ref<Terrain3DLayer> candidate = layers[j];
-			if (candidate == p_layer) {
-				if (r_region) {
-					*r_region = region;
-				}
-				if (r_region_loc) {
-					*r_region_loc = region_loc;
-				}
-				if (r_index) {
-					*r_index = j;
-				}
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-uint64_t Terrain3DData::_allocate_layer_group_id() {
-	return _next_layer_group_id++;
-}
-
-uint64_t Terrain3DData::_ensure_layer_group_id_internal(const Ref<Terrain3DLayer> &p_layer) {
-	if (p_layer.is_null()) {
-		return 0;
-	}
-	uint64_t group_id = p_layer->get_group_id();
-	if (group_id == 0) {
-		group_id = _allocate_layer_group_id();
-		p_layer->set_group_id(group_id);
-	} else if (group_id >= _next_layer_group_id) {
-		_next_layer_group_id = group_id + 1;
-	}
-	return group_id;
-}
-
-void Terrain3DData::_ensure_region_layer_groups(const Ref<Terrain3DRegion> &p_region) {
-	if (p_region.is_null()) {
-		return;
-	}
-	for (int map_type = TYPE_HEIGHT; map_type < TYPE_MAX; map_type++) {
-		TypedArray<Terrain3DLayer> layers = p_region->get_layers(MapType(map_type));
-		for (int i = 0; i < layers.size(); i++) {
-			_ensure_layer_group_id_internal(layers[i]);
-		}
-	}
-}
-
-uint64_t Terrain3DData::ensure_layer_group_id(const Ref<Terrain3DLayer> &p_layer) {
-	return _ensure_layer_group_id_internal(p_layer);
-}
-
-Ref<Terrain3DLayer> Terrain3DData::_duplicate_layer_template(const Ref<Terrain3DLayer> &p_template) const {
-	if (p_template.is_null()) {
-		return Ref<Terrain3DLayer>();
-	}
-	Ref<Terrain3DLayer> clone = p_template->duplicate(true);
-	if (clone.is_null()) {
-		return Ref<Terrain3DLayer>();
-	}
-	clone->set_payload(Ref<Image>());
-	clone->set_alpha(Ref<Image>());
-	clone->set_coverage(Rect2i());
-	clone->mark_dirty();
-	clone->set_map_type(p_template->get_map_type());
-	clone->set_group_id(p_template->get_group_id());
-	clone->set_enabled(p_template->is_enabled());
-	clone->set_intensity(p_template->get_intensity());
-	clone->set_feather_radius(p_template->get_feather_radius());
-	clone->set_blend_mode(p_template->get_blend_mode());
-	clone->set_user_editable(p_template->is_user_editable());
-	return clone;
 }
 
 ///////////////////////////
@@ -345,7 +248,6 @@ Error Terrain3DData::add_region(const Ref<Terrain3DRegion> &p_region, const bool
 		return FAILED;
 	}
 	p_region->sanitize_maps();
-	_ensure_region_layer_groups(p_region);
 	p_region->set_deleted(false);
 	if (!_region_locations.has(region_loc)) {
 		_region_locations.push_back(region_loc);
@@ -539,683 +441,6 @@ TypedArray<Image> Terrain3DData::get_maps(const MapType p_map_type) const {
 	return TypedArray<Image>();
 }
 
-TypedArray<Terrain3DLayer> Terrain3DData::get_layers(const Vector2i &p_region_loc, const MapType p_map_type) const {
-	TypedArray<Terrain3DLayer> layers;
-	const Terrain3DRegion *region = get_region_ptr(p_region_loc);
-	if (!region) {
-		LOG(ERROR, "Cannot retrieve layers. Region not found at ", p_region_loc);
-		return layers;
-	}
-	layers = region->get_layers(p_map_type);
-	return layers;
-}
-
-TypedArray<Dictionary> Terrain3DData::get_layer_groups(const MapType p_map_type) {
-	TypedArray<Dictionary> result;
-	if (p_map_type < 0 || p_map_type >= TYPE_MAX) {
-		return result;
-	}
-	Dictionary grouped;
-	Array region_keys = _regions.keys();
-	for (int i = 0; i < region_keys.size(); i++) {
-		Vector2i region_loc = region_keys[i];
-		const Terrain3DRegion *region = get_region_ptr(region_loc);
-		if (!region || region->is_deleted()) {
-			continue;
-		}
-		TypedArray<Terrain3DLayer> layers = region->get_layers(p_map_type);
-		for (int layer_index = 0; layer_index < layers.size(); layer_index++) {
-			Ref<Terrain3DLayer> layer = layers[layer_index];
-			if (layer.is_null()) {
-				continue;
-			}
-			uint64_t group_id = _ensure_layer_group_id_internal(layer);
-			if (group_id == 0) {
-				continue;
-			}
-			if (!grouped.has(group_id)) {
-				Dictionary group_info;
-				group_info["group_id"] = group_id;
-				group_info["map_type"] = p_map_type;
-				group_info["layers"] = Array();
-				grouped[group_id] = group_info;
-			}
-			Dictionary group_info = grouped[group_id];
-			Array slices = group_info["layers"];
-			Dictionary slice_info;
-			slice_info["region_location"] = region_loc;
-			slice_info["layer_index"] = layer_index;
-			slice_info["layer"] = layer;
-			slices.push_back(slice_info);
-			group_info["layers"] = slices;
-			grouped[group_id] = group_info;
-		}
-	}
-	Array grouped_keys = grouped.keys();
-	grouped_keys.sort();
-	for (int i = 0; i < grouped_keys.size(); i++) {
-		Variant key = grouped_keys[i];
-		result.push_back(grouped[key]);
-	}
-	return result;
-}
-
-Ref<Terrain3DLayer> Terrain3DData::add_layer(const Vector2i &p_region_loc, const MapType p_map_type, const Ref<Terrain3DLayer> &p_layer, const int p_index, const bool p_update) {
-	Terrain3DRegion *region = get_region_ptr(p_region_loc);
-	if (!region) {
-		LOG(ERROR, "Cannot add layer. Region not found at ", p_region_loc);
-		return Ref<Terrain3DLayer>();
-	}
-	if (p_layer.is_null()) {
-		LOG(ERROR, "Cannot add layer. Provided layer is null");
-		return Ref<Terrain3DLayer>();
-	}
-	_ensure_layer_group_id_internal(p_layer);
-	Ref<Terrain3DLayer> layer = region->add_layer(p_map_type, p_layer, p_index);
-	if (layer.is_valid()) {
-		region->set_modified(true);
-		region->set_edited(true);
-		if (p_update) {
-			update_maps(p_map_type, false, false);
-		}
-	}
-	return layer;
-}
-
-Ref<Terrain3DStampLayer> Terrain3DData::add_stamp_layer(const Vector2i &p_region_loc, const MapType p_map_type, const Ref<Image> &p_payload, const Rect2i &p_coverage, const Ref<Image> &p_alpha, const real_t p_intensity, const real_t p_feather_radius, const Terrain3DLayer::BlendMode p_blend_mode, const int p_index, const bool p_update) {
-	Ref<Terrain3DStampLayer> result;
-	Terrain3DRegion *region = get_region_ptr(p_region_loc);
-	if (!region) {
-		LOG(ERROR, "Cannot add stamp layer. Region not found at ", p_region_loc);
-		return result;
-	}
-	if (p_payload.is_null()) {
-		LOG(ERROR, "Stamp layer requires a valid payload image");
-		return result;
-	}
-	Rect2i coverage = p_coverage;
-	int region_size = region->get_region_size();
-	Vector2i max_bounds(region_size, region_size);
-	coverage.position.x = CLAMP(coverage.position.x, 0, max_bounds.x - 1);
-	coverage.position.y = CLAMP(coverage.position.y, 0, max_bounds.y - 1);
-	Vector2i coverage_end = coverage.position + coverage.size;
-	coverage_end.x = CLAMP(coverage_end.x, coverage.position.x + 1, max_bounds.x);
-	coverage_end.y = CLAMP(coverage_end.y, coverage.position.y + 1, max_bounds.y);
-	coverage.size = coverage_end - coverage.position;
-	if (coverage.size.x <= 0 || coverage.size.y <= 0) {
-		LOG(WARN, "Stamp coverage lies outside the region bounds; skipping layer creation");
-		return result;
-	}
-	Ref<Image> payload = p_payload;
-	Image::Format expected_format = map_type_get_format(p_map_type);
-	if (payload->get_format() != expected_format) {
-		payload = payload->duplicate();
-		if (payload.is_valid()) {
-			payload->convert(expected_format);
-		}
-	}
-	if (payload.is_null()) {
-		LOG(ERROR, "Failed to prepare stamp payload image");
-		return result;
-	}
-	Ref<Terrain3DStampLayer> layer;
-	layer.instantiate();
-	layer->set_map_type(p_map_type);
-	layer->set_coverage(coverage);
-	layer->set_payload(payload);
-	if (p_alpha.is_valid()) {
-		layer->set_alpha(p_alpha);
-	}
-	layer->set_intensity(p_intensity);
-	layer->set_feather_radius(p_feather_radius);
-	layer->set_blend_mode(p_blend_mode);
-	layer->set_enabled(true);
-	_ensure_layer_group_id_internal(layer);
-	Ref<Terrain3DLayer> stored = region->add_layer(p_map_type, layer, p_index);
-	result = stored;
-	if (result.is_null()) {
-		result = layer;
-	}
-	region->set_modified(true);
-	region->set_edited(true);
-	if (p_update) {
-		update_maps(p_map_type, false, false);
-	}
-	return result;
-}
-
-Ref<Terrain3DLayer> Terrain3DData::get_layer_in_group(const Vector2i &p_region_loc, const MapType p_map_type, const uint64_t p_group_id, int *r_index) {
-	if (p_group_id == 0) {
-		return Ref<Terrain3DLayer>();
-	}
-	const Terrain3DRegion *region = get_region_ptr(p_region_loc);
-	if (!region) {
-		return Ref<Terrain3DLayer>();
-	}
-	TypedArray<Terrain3DLayer> layers = region->get_layers(p_map_type);
-	for (int i = 0; i < layers.size(); i++) {
-		Ref<Terrain3DLayer> layer = layers[i];
-		if (layer.is_null()) {
-			continue;
-		}
-		uint64_t group_id = _ensure_layer_group_id_internal(layer);
-		if (group_id == p_group_id) {
-			if (r_index) {
-				*r_index = i;
-			}
-			return layer;
-		}
-	}
-	return Ref<Terrain3DLayer>();
-}
-
-Ref<Terrain3DLayer> Terrain3DData::create_layer_group_slice(const Vector2i &p_region_loc, const MapType p_map_type, const uint64_t p_group_id, const Ref<Terrain3DLayer> &p_template_layer, const bool p_update) {
-	if (p_group_id == 0 || p_template_layer.is_null()) {
-		return Ref<Terrain3DLayer>();
-	}
-	Ref<Terrain3DLayer> clone = _duplicate_layer_template(p_template_layer);
-	if (clone.is_null()) {
-		return Ref<Terrain3DLayer>();
-	}
-	clone->set_group_id(p_group_id);
-	clone->set_map_type(p_map_type);
-	return add_layer(p_region_loc, p_map_type, clone, -1, p_update);
-}
-
-TypedArray<Terrain3DStampLayer> Terrain3DData::add_stamp_layer_global(const Rect2i &p_global_coverage, const MapType p_map_type, const Ref<Image> &p_payload, const Ref<Image> &p_alpha, const real_t p_intensity, const real_t p_feather_radius, const Terrain3DLayer::BlendMode p_blend_mode, const bool p_auto_create_regions, const bool p_update) {
-	TypedArray<Terrain3DStampLayer> created_layers;
-	if (!p_global_coverage.has_area()) {
-		LOG(WARN, "add_stamp_layer_global: coverage has no area");
-		return created_layers;
-	}
-	LayerSplitResults splits = split_layer_payload_global(p_global_coverage, p_payload, p_alpha);
-	if (splits.empty()) {
-		return created_layers;
-	}
-	bool any_added = false;
-	uint64_t shared_group_id = 0;
-	for (const LayerSplitResult &slice : splits) {
-		Terrain3DRegion *region = get_region_ptr(slice.region_location);
-		if (!region && p_auto_create_regions) {
-			Ref<Terrain3DRegion> new_region = add_region_blank(slice.region_location, false);
-			region = new_region.is_valid() ? new_region.ptr() : nullptr;
-		}
-		if (!region) {
-			LOG(WARN, "add_stamp_layer_global: region ", slice.region_location, " unavailable; skipping slice");
-			continue;
-		}
-		Ref<Terrain3DStampLayer> added = add_stamp_layer(slice.region_location, p_map_type, slice.payload, slice.coverage, slice.alpha, p_intensity, p_feather_radius, p_blend_mode, -1, false);
-		if (added.is_valid()) {
-			if (shared_group_id == 0) {
-				shared_group_id = ensure_layer_group_id(added);
-			} else {
-				added->set_group_id(shared_group_id);
-			}
-			created_layers.push_back(added);
-			any_added = true;
-		}
-	}
-	if (any_added && p_update) {
-		update_maps(p_map_type, false, false);
-	}
-	return created_layers;
-}
-
-Terrain3DData::LayerSplitResults Terrain3DData::split_layer_payload_global(const Rect2i &p_global_coverage, const Ref<Image> &p_payload, const Ref<Image> &p_alpha) const {
-	LayerSplitResults slices;
-	if (!p_global_coverage.has_area()) {
-		LOG(DEBUG, "split_layer_payload_global: requested coverage has no area");
-		return slices;
-	}
-	if (p_payload.is_null()) {
-		LOG(WARN, "split_layer_payload_global: payload image is null");
-		return slices;
-	}
-	if (_region_size <= 0) {
-		LOG(ERROR, "split_layer_payload_global: invalid region size ", _region_size);
-		return slices;
-	}
-	Vector2i payload_size(p_payload->get_width(), p_payload->get_height());
-	if (payload_size.x <= 0 || payload_size.y <= 0) {
-		LOG(ERROR, "split_layer_payload_global: payload has invalid dimensions ", payload_size);
-		return slices;
-	}
-	if (payload_size != p_global_coverage.size) {
-		LOG(ERROR, "split_layer_payload_global: payload size ", payload_size, " does not match coverage size ", p_global_coverage.size);
-		return slices;
-	}
-	if (p_alpha.is_valid()) {
-		Vector2i alpha_size(p_alpha->get_width(), p_alpha->get_height());
-		if (alpha_size != payload_size) {
-			LOG(WARN, "split_layer_payload_global: alpha size ", alpha_size, " does not match payload size ", payload_size, ". Alpha will be ignored");
-		}
-	}
-	auto floor_div = [](int value, int divisor) -> int {
-		if (divisor == 0) {
-			return 0;
-		}
-		int result = value / divisor;
-		int remainder = value % divisor;
-		if (remainder != 0 && ((remainder < 0) != (divisor < 0))) {
-			result -= 1;
-		}
-		return result;
-	};
-	Vector2i coverage_end = p_global_coverage.get_end();
-	coverage_end -= Vector2i(1, 1); // Make inclusive for region range calculation
-	int min_region_x = floor_div(p_global_coverage.position.x, _region_size);
-	int min_region_y = floor_div(p_global_coverage.position.y, _region_size);
-	int max_region_x = floor_div(coverage_end.x, _region_size);
-	int max_region_y = floor_div(coverage_end.y, _region_size);
-	for (int region_y = min_region_y; region_y <= max_region_y; region_y++) {
-		for (int region_x = min_region_x; region_x <= max_region_x; region_x++) {
-			Vector2i region_loc(region_x, region_y);
-			Rect2i region_bounds(region_loc * _region_size, Vector2i(_region_size, _region_size));
-			Rect2i slice_global = region_bounds.intersection(p_global_coverage);
-			if (!slice_global.has_area()) {
-				continue;
-			}
-			Rect2i payload_rect(slice_global.position - p_global_coverage.position, slice_global.size);
-			if (payload_rect.position.x < 0 || payload_rect.position.y < 0 ||
-				payload_rect.get_end().x > payload_size.x || payload_rect.get_end().y > payload_size.y) {
-				LOG(ERROR, "split_layer_payload_global: computed payload rect ", payload_rect,
-					" falls outside payload bounds ", Rect2i(Vector2i(), payload_size));
-				return slices;
-			}
-			Ref<Image> region_payload;
-			region_payload.instantiate();
-			region_payload->create(slice_global.size.x, slice_global.size.y, false, p_payload->get_format());
-			region_payload->blit_rect(p_payload, payload_rect, Vector2i());
-			Ref<Image> region_alpha;
-			if (p_alpha.is_valid() && p_alpha->get_width() == payload_size.x && p_alpha->get_height() == payload_size.y) {
-				region_alpha.instantiate();
-				region_alpha->create(slice_global.size.x, slice_global.size.y, false, p_alpha->get_format());
-				region_alpha->blit_rect(p_alpha, payload_rect, Vector2i());
-			}
-			LayerSplitResult slice;
-			slice.region_location = region_loc;
-			slice.coverage = Rect2i(slice_global.position - region_bounds.position, slice_global.size);
-			slice.payload = region_payload;
-			slice.alpha = region_alpha;
-			slices.push_back(slice);
-		}
-	}
-	return slices;
-}
-
-TypedArray<Dictionary> Terrain3DData::split_layer_payload_global_data(const Rect2i &p_global_coverage, const Ref<Image> &p_payload, const Ref<Image> &p_alpha) const {
-	TypedArray<Dictionary> result;
-	LayerSplitResults slices = split_layer_payload_global(p_global_coverage, p_payload, p_alpha);
-	for (const LayerSplitResult &slice : slices) {
-		Dictionary entry;
-		entry["region_location"] = slice.region_location;
-		entry["coverage"] = slice.coverage;
-		if (slice.payload.is_valid()) {
-			entry["payload"] = slice.payload;
-		}
-		if (slice.alpha.is_valid()) {
-			entry["alpha"] = slice.alpha;
-		}
-		result.push_back(entry);
-	}
-	return result;
-}
-
-Dictionary Terrain3DData::get_layer_owner_info(const Ref<Terrain3DLayer> &p_layer, const MapType p_map_type) const {
-	Dictionary result;
-	if (p_layer.is_null()) {
-		return result;
-	}
-	Terrain3DRegion *region = nullptr;
-	Vector2i region_loc;
-	int index = -1;
-	if (!_find_layer_owner(p_layer, p_map_type, &region, &region_loc, &index)) {
-		return result;
-	}
-	result["region_location"] = region_loc;
-	result["index"] = index;
-	result["map_type"] = p_map_type;
-	return result;
-}
-
-bool Terrain3DData::set_layer_coverage(const Vector2i &p_region_loc, const MapType p_map_type, const int p_index, const Rect2i &p_coverage, const bool p_update) {
-	Terrain3DRegion *region = get_region_ptr(p_region_loc);
-	if (!region) {
-		LOG(WARN, "Cannot set layer coverage. Region not found at ", p_region_loc);
-		return false;
-	}
-	int region_size = region->get_region_size();
-	if (!is_valid_region_size(region_size)) {
-		Ref<Image> map = region->get_map(p_map_type);
-		if (map.is_valid()) {
-			region_size = MAX(map->get_width(), map->get_height());
-		}
-	}
-	if (!is_valid_region_size(region_size)) {
-		region_size = _region_size;
-	}
-	if (!is_valid_region_size(region_size)) {
-		LOG(ERROR, "Cannot set layer coverage. Region size unresolved for ", p_region_loc);
-		return false;
-	}
-	TypedArray<Terrain3DLayer> layers = region->get_layers(p_map_type);
-	if (p_index < 0 || p_index >= layers.size()) {
-		LOG(WARN, "Layer index ", p_index, " out of bounds for region ", p_region_loc);
-		return false;
-	}
-	Ref<Terrain3DLayer> layer = layers[p_index];
-	if (layer.is_null()) {
-		LOG(WARN, "Layer at index ", p_index, " is null in region ", p_region_loc);
-		return false;
-	}
-	Rect2i coverage = p_coverage;
-	Vector2i coverage_size = coverage.size;
-	if (coverage_size.x <= 0 || coverage_size.y <= 0) {
-		Ref<Image> payload = layer->get_payload();
-		if (payload.is_valid()) {
-			coverage_size = payload->get_size();
-		} else {
-			coverage_size = Vector2i(_region_size, _region_size);
-		}
-		coverage.size = coverage_size;
-	}
-	coverage_size.x = CLAMP(coverage_size.x, 1, region_size);
-	coverage_size.y = CLAMP(coverage_size.y, 1, region_size);
-	int max_x = MAX(0, region_size - coverage_size.x);
-	int max_y = MAX(0, region_size - coverage_size.y);
-	Vector2i clamped_pos(
-		CLAMP(coverage.position.x, 0, max_x),
-		CLAMP(coverage.position.y, 0, max_y));
-	coverage.position = clamped_pos;
-	coverage.size = coverage_size;
-	layer->set_coverage(coverage);
-	layer->mark_dirty();
-	region->mark_layers_dirty(p_map_type);
-	region->set_modified(true);
-	region->set_edited(true);
-	if (p_update) {
-		update_maps(p_map_type, false, false);
-	}
-	return true;
-}
-
-bool Terrain3DData::move_stamp_layer(const Ref<Terrain3DStampLayer> &p_layer, const Vector3 &p_world_position, const bool p_update) {
-	if (p_layer.is_null()) {
-		LOG(WARN, "Cannot move stamp layer: layer reference is null");
-		return false;
-	}
-	MapType map_type = p_layer->get_map_type();
-	Terrain3DRegion *current_region = nullptr;
-	Vector2i current_loc;
-	int current_index = -1;
-	if (!_find_layer_owner(p_layer, map_type, &current_region, &current_loc, &current_index)) {
-		LOG(WARN, "Cannot move stamp layer: owning region not located");
-		return false;
-	}
-	LOG(DEBUG, "move_stamp_layer: request from region ", current_loc, " index ", current_index,
-			" map_type ", map_type, " world ", p_world_position);
-	Vector2i target_loc = get_region_location(p_world_position);
-	Terrain3DRegion *target_region = get_region_ptr(target_loc);
-	if (!target_region) {
-		LOG(WARN, "Cannot move stamp layer: target region ", target_loc, " not available for world position ", p_world_position);
-		return false;
-	}
-	Rect2i coverage = p_layer->get_coverage();
-	Vector2i coverage_size = coverage.size;
-	if (coverage_size.x <= 0 || coverage_size.y <= 0) {
-		Ref<Image> payload = p_layer->get_payload();
-		if (payload.is_valid()) {
-			coverage_size = payload->get_size();
-		} else {
-			coverage_size = Vector2i(_region_size, _region_size);
-		}
-	}
-	if (coverage_size.x <= 0 || coverage_size.y <= 0) {
-		LOG(WARN, "Cannot move stamp layer: invalid coverage dimensions");
-		return false;
-	}
-	coverage.size = coverage_size;
-	Vector2 region_origin = Vector2(target_loc) * real_t(_region_size) * _vertex_spacing;
-	Vector2 local = (Vector2(p_world_position.x, p_world_position.z) - region_origin) / _vertex_spacing;
-	Vector2 offset = Vector2(coverage_size) * 0.5f;
-	Vector2 target_pos_f = local - offset;
-	Vector2i target_pos(
-		int(Math::round(target_pos_f.x)),
-		int(Math::round(target_pos_f.y)));
-	int max_x = MAX(0, _region_size - coverage_size.x);
-	int max_y = MAX(0, _region_size - coverage_size.y);
-	target_pos.x = CLAMP(target_pos.x, 0, max_x);
-	target_pos.y = CLAMP(target_pos.y, 0, max_y);
-	Rect2i target_coverage(target_pos, coverage_size);
-	LOG(DEBUG, "move_stamp_layer: target region ", target_loc, " coverage size ", coverage_size,
-			" target_pos ", target_pos, " region_origin ", region_origin);
-	Ref<Terrain3DStampLayer> stamp_layer = p_layer;
-	if (current_region != target_region) {
-		LOG(DEBUG, "move_stamp_layer: transferring layer from region ", current_loc, " to ", target_loc);
-		current_region->remove_layer(map_type, current_index);
-		current_region->mark_layers_dirty(map_type);
-		current_region->set_modified(true);
-		current_region->set_edited(true);
-		Ref<Terrain3DLayer> stored = target_region->add_layer(map_type, stamp_layer);
-		Ref<Terrain3DStampLayer> stored_stamp = stored;
-		if (stored_stamp.is_valid()) {
-			stamp_layer = stored_stamp;
-		}
-	}
-	stamp_layer->set_coverage(target_coverage);
-	stamp_layer->mark_dirty();
-	target_region->mark_layers_dirty(map_type);
-	target_region->set_modified(true);
-	target_region->set_edited(true);
-	LOG(DEBUG, "move_stamp_layer: coverage updated to ", target_coverage, " (map_type ", map_type, ")");
-	if (p_update) {
-		update_maps(map_type, false, false);
-	}
-	return true;
-}
-
-void Terrain3DData::set_layer_enabled(const Vector2i &p_region_loc, const MapType p_map_type, const int p_index, const bool p_enabled, const bool p_update) {
-	Terrain3DRegion *region = get_region_ptr(p_region_loc);
-	if (!region) {
-		LOG(ERROR, "Cannot set layer enabled state. Region not found at ", p_region_loc);
-		return;
-	}
-	TypedArray<Terrain3DLayer> layers = region->get_layers(p_map_type);
-	if (p_index < 0 || p_index >= layers.size()) {
-		LOG(WARN, "Layer index ", p_index, " out of bounds for region ", p_region_loc);
-		return;
-	}
-	Ref<Terrain3DLayer> layer = layers[p_index];
-	if (layer.is_null()) {
-		LOG(WARN, "Layer at index ", p_index, " is null in region ", p_region_loc);
-		return;
-	}
-	if (layer->is_enabled() == p_enabled) {
-		return;
-	}
-	layer->set_enabled(p_enabled);
-	region->mark_layers_dirty(p_map_type);
-	region->set_modified(true);
-	region->set_edited(true);
-	if (p_update) {
-		update_maps(p_map_type, false, false);
-	}
-}
-
-void Terrain3DData::remove_layer(const Vector2i &p_region_loc, const MapType p_map_type, const int p_index, const bool p_update) {
-	Terrain3DRegion *region = get_region_ptr(p_region_loc);
-	if (!region) {
-		LOG(ERROR, "Cannot remove layer. Region not found at ", p_region_loc);
-		return;
-	}
-	region->remove_layer(p_map_type, p_index);
-	region->set_modified(true);
-	region->set_edited(true);
-	if (p_update) {
-		update_maps(p_map_type, false, false);
-	}
-}
-
-Ref<Terrain3DStampLayer> Terrain3DData::set_map_layer(const Vector2i &p_region_loc, const MapType p_map_type, const Ref<Image> &p_image, const uint64_t p_external_id, const bool p_update) {
-	// Validate input data
-	if (p_image.is_null()) {
-		LOG(ERROR, "set_map_layer: Input image is null");
-		return Ref<Terrain3DStampLayer>();
-	}
-	
-	if (p_image->get_width() <= 0 || p_image->get_height() <= 0) {
-		LOG(ERROR, "set_map_layer: Input image has invalid dimensions: ", 
-			Vector2i(p_image->get_width(), p_image->get_height()));
-		return Ref<Terrain3DStampLayer>();
-	}
-	
-	// Validate image format matches the MapType
-	Image::Format expected_format = map_type_get_format(p_map_type);
-	Image::Format actual_format = p_image->get_format();
-	
-	if (actual_format != expected_format) {
-		LOG(ERROR, "set_map_layer: Image format mismatch. Expected ", 
-			expected_format, " for ", map_type_get_string(p_map_type), 
-			" but got ", actual_format);
-		return Ref<Terrain3DStampLayer>();
-	}
-	
-	Terrain3DRegion *region = get_region_ptr(p_region_loc);
-	if (!region) {
-		LOG(ERROR, "set_map_layer: Region not found at ", p_region_loc);
-		return Ref<Terrain3DStampLayer>();
-	}
-	
-	Ref<Terrain3DStampLayer> layer;
-	
-	// Check if we have an existing external layer for this external_id
-	if (p_external_id != 0 && _external_layers.has(p_external_id)) {
-		Dictionary layer_info = _external_layers[p_external_id];
-		Vector2i stored_loc = layer_info.get("region_loc", Vector2i());
-		MapType stored_type = MapType(int(layer_info.get("map_type", TYPE_HEIGHT)));
-		
-		// Verify the region and map type match
-		if (stored_loc == p_region_loc && stored_type == p_map_type) {
-			layer = layer_info.get("layer", Ref<Terrain3DStampLayer>());
-			if (layer.is_valid()) {
-				// Update existing layer
-				layer->set_payload(p_image);
-				layer->set_coverage(Rect2i(Vector2i(), Vector2i(p_image->get_width(), p_image->get_height())));
-				
-				// Mark dirty for the entire coverage area
-				// Thread-safe: mark_layers_dirty uses atomic-safe operations for dirty flags
-				region->mark_layers_dirty(p_map_type, true);
-				region->set_modified(true);
-				region->set_edited(true);
-				
-				if (p_update) {
-					update_maps(p_map_type, false, false);
-				}
-				
-				LOG(DEBUG, "set_map_layer: Updated existing external layer ", p_external_id, 
-					" in region ", p_region_loc, " for ", map_type_get_string(p_map_type));
-				
-				return layer;
-			}
-		} else {
-			LOG(WARN, "set_map_layer: External ID ", p_external_id, 
-				" registered for different region/type. Creating new layer.");
-		}
-	}
-	
-	// Create new layer
-	layer.instantiate();
-	if (layer.is_null()) {
-		LOG(ERROR, "set_map_layer: Failed to instantiate Terrain3DStampLayer");
-		return Ref<Terrain3DStampLayer>();
-	}
-	
-	// Configure the layer as non-user-editable (can only be modified by external tools)
-	layer->set_user_editable(false);
-	layer->set_map_type(p_map_type);
-	layer->set_payload(p_image);
-	layer->set_coverage(Rect2i(Vector2i(), Vector2i(p_image->get_width(), p_image->get_height())));
-	layer->set_blend_mode(Terrain3DLayer::BLEND_REPLACE); // Default to replace mode like set_map()
-	layer->set_intensity(1.0f);
-	layer->set_enabled(true);
-	
-	// Add the layer to the region
-	Ref<Terrain3DLayer> added_layer = region->add_layer(p_map_type, layer, -1);
-	if (added_layer.is_null()) {
-		LOG(ERROR, "set_map_layer: Failed to add layer to region");
-		return Ref<Terrain3DStampLayer>();
-	}
-	
-	// Track this external layer if external_id is provided
-	if (p_external_id != 0) {
-		Dictionary layer_info;
-		layer_info["region_loc"] = p_region_loc;
-		layer_info["layer"] = layer;
-		layer_info["map_type"] = int(p_map_type);
-		_external_layers[p_external_id] = layer_info;
-	}
-	
-	region->set_modified(true);
-	region->set_edited(true);
-	
-	if (p_update) {
-		update_maps(p_map_type, false, false);
-	}
-	
-	LOG(DEBUG, "set_map_layer: Created new external layer ", 
-		(p_external_id != 0 ? String::num_uint64(p_external_id) : String("(no ID)")),
-		" in region ", p_region_loc, " for ", map_type_get_string(p_map_type));
-	
-	return layer;
-}
-
-bool Terrain3DData::release_map_layer(const uint64_t p_external_id, const bool p_remove_layer, const bool p_update) {
-	if (p_external_id == 0) {
-		LOG(WARN, "release_map_layer: external_id must be non-zero");
-		return false;
-	}
-	if (!_external_layers.has(p_external_id)) {
-		LOG(WARN, "release_map_layer: External ID ", p_external_id, " is not registered");
-		return false;
-	}
-	Dictionary layer_info = _external_layers[p_external_id];
-	_external_layers.erase(p_external_id);
-
-	if (!p_remove_layer) {
-		LOG(DEBUG, "release_map_layer: Detached tracking for external layer ", p_external_id);
-		return true;
-	}
-
-	Ref<Terrain3DLayer> layer = layer_info.get("layer", Ref<Terrain3DLayer>());
-	if (layer.is_null()) {
-		LOG(WARN, "release_map_layer: Layer reference missing for external ID ", p_external_id);
-		return false;
-	}
-	Vector2i region_loc = layer_info.get("region_loc", Vector2i());
-	MapType map_type = MapType(int(layer_info.get("map_type", TYPE_HEIGHT)));
-	Terrain3DRegion *region = get_region_ptr(region_loc);
-	if (!region) {
-		LOG(WARN, "release_map_layer: Region not found at ", region_loc, " for external ID ", p_external_id);
-		return false;
-	}
-	TypedArray<Terrain3DLayer> layers = region->get_layers(map_type);
-	for (int i = 0; i < layers.size(); i++) {
-		if (layers[i] == layer) {
-			region->remove_layer(map_type, i);
-			region->set_modified(true);
-			region->set_edited(true);
-			if (p_update) {
-				update_maps(map_type, false, false);
-			}
-			LOG(DEBUG, "release_map_layer: Removed external layer ", p_external_id, " from region ", region_loc, " (", map_type_get_string(map_type), ")");
-			return true;
-		}
-	}
-
-	LOG(WARN, "release_map_layer: Layer not found in region stack for external ID ", p_external_id);
-	return false;
-}
-
 void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regions, const bool p_generate_mipmaps) {
 	// Generate region color mipmaps
 	if (p_generate_mipmaps && (p_map_type == TYPE_COLOR || p_map_type == TYPE_MAX)) {
@@ -1262,9 +487,8 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		_region_locations = TypedArray<Vector2i>(); // enforce new pointer
 		Array locs = _regions.keys();
 		int region_id = 0;
-		for (int i = 0; i < locs.size(); i++) {
-			Vector2i region_loc = locs[i];
-			Terrain3DRegion *region = get_region_ptr(region_loc);
+		for (const Vector2i &region_loc : locs) {
+			const Terrain3DRegion *region = get_region_ptr(region_loc);
 			if (region && !region->is_deleted()) {
 				region_id += 1; // Begin at 1 since 0 = no region
 				int map_index = get_region_map_index(region_loc);
@@ -1279,15 +503,26 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		emit_signal("region_map_changed");
 	}
 
+	// Verify generated maps are the correct size (e.g. region count changed without p_all_regions)
+	if (_generated_height_maps.size() != _region_locations.size()) {
+		LOG(WARN, "Generated height map size ", _generated_height_maps.size(), " != region location count ", _region_locations.size(), ". Forcing regen.");
+		_generated_height_maps.clear();
+	}
+	if (_generated_control_maps.size() != _region_locations.size()) {
+		_generated_control_maps.clear();
+	}
+	if (_generated_color_maps.size() != _region_locations.size()) {
+		_generated_color_maps.clear();
+	}
+
 	// Rebuild height maps if dirty
 	if (_generated_height_maps.is_dirty()) {
 		LOG(EXTREME, "Regenerating height texture array from regions");
 		_height_maps.clear();
-		for (int i = 0; i < _region_locations.size(); i++) {
-			Vector2i region_loc = _region_locations[i];
-			Terrain3DRegion *region = get_region_ptr(region_loc);
+		for (const Vector2i &region_loc : _region_locations) {
+			const Terrain3DRegion *region = get_region_ptr(region_loc);
 			if (region) {
-				_height_maps.push_back(region->get_composited_map(TYPE_HEIGHT));
+				_height_maps.push_back(region->get_map(Terrain3DRegion::TYPE_HEIGHT));
 			} else {
 				LOG(ERROR, "Can't find region ", region_loc, ", _regions: ", _regions,
 						", locations: ", _region_locations, ". Please report this error.");
@@ -1297,6 +532,7 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		_generated_height_maps.create(_height_maps);
 		calc_height_range();
 		any_changed = true;
+		LOG(DEBUG, "Emitting height_maps_changed");
 		emit_signal("height_maps_changed");
 	}
 
@@ -1304,15 +540,15 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 	if (_generated_control_maps.is_dirty()) {
 		LOG(EXTREME, "Regenerating control texture array from regions");
 		_control_maps.clear();
-		for (int i = 0; i < _region_locations.size(); i++) {
-			Vector2i region_loc = _region_locations[i];
-			Terrain3DRegion *region = get_region_ptr(region_loc);
+		for (const Vector2i &region_loc : _region_locations) {
+			const Terrain3DRegion *region = get_region_ptr(region_loc);
 			if (region) {
-				_control_maps.push_back(region->get_composited_map(TYPE_CONTROL));
+				_control_maps.push_back(region->get_map(Terrain3DRegion::TYPE_CONTROL));
 			}
 		}
 		_generated_control_maps.create(_control_maps);
 		any_changed = true;
+		LOG(DEBUG, "Emitting control_maps_changed");
 		emit_signal("control_maps_changed");
 	}
 
@@ -1320,65 +556,60 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 	if (_generated_color_maps.is_dirty()) {
 		LOG(EXTREME, "Regenerating color texture array from regions");
 		_color_maps.clear();
-		for (int i = 0; i < _region_locations.size(); i++) {
-			Vector2i region_loc = _region_locations[i];
-			Terrain3DRegion *region = get_region_ptr(region_loc);
+		for (const Vector2i &region_loc : _region_locations) {
+			const Terrain3DRegion *region = get_region_ptr(region_loc);
 			if (region) {
-				_color_maps.push_back(region->get_composited_map(TYPE_COLOR));
+				_color_maps.push_back(region->get_map(Terrain3DRegion::TYPE_COLOR));
 			}
 		}
 		_generated_color_maps.create(_color_maps);
 		any_changed = true;
+		LOG(DEBUG, "Emitting color_maps_changed");
 		emit_signal("color_maps_changed");
 	}
 
 	// If no maps have been rebuilt, update only individual regions in the array.
 	// Regions marked Edited have been changed by Terrain3DEditor::_operate_map or undo / redo processing.
 	if (!any_changed) {
-		for (int i = 0; i < _region_locations.size(); i++) {
-			Vector2i region_loc = _region_locations[i];
-			Terrain3DRegion *region = get_region_ptr(region_loc);
+		for (const Vector2i &region_loc : _region_locations) {
+			const Terrain3DRegion *region = get_region_ptr(region_loc);
 			if (region && region->is_edited()) {
 				int region_id = get_region_id(region_loc);
 				switch (p_map_type) {
 					case TYPE_HEIGHT:
-						{
-							Ref<Image> height_map = region->get_composited_map(TYPE_HEIGHT);
-							_generated_height_maps.update(height_map, region_id);
-							region->update_height_range_from_image(height_map);
-							update_master_heights(region->get_height_range());
-						}
+						_generated_height_maps.update(region->get_map(Terrain3DRegion::TYPE_HEIGHT), region_id);
+						LOG(DEBUG, "Emitting height_maps_changed");
 						emit_signal("height_maps_changed");
 						break;
 					case TYPE_CONTROL:
-						_generated_control_maps.update(region->get_composited_map(TYPE_CONTROL), region_id);
+						_generated_control_maps.update(region->get_map(Terrain3DRegion::TYPE_CONTROL), region_id);
+						LOG(DEBUG, "Emitting control_maps_changed");
 						emit_signal("control_maps_changed");
 						break;
 					case TYPE_COLOR:
-						_generated_color_maps.update(region->get_composited_map(TYPE_COLOR), region_id);
+						_generated_color_maps.update(region->get_map(Terrain3DRegion::TYPE_COLOR), region_id);
+						LOG(DEBUG, "Emitting color_maps_changed");
 						emit_signal("color_maps_changed");
 						break;
 					default:
-						{
-							Ref<Image> height_map = region->get_composited_map(TYPE_HEIGHT);
-							_generated_height_maps.update(height_map, region_id);
-							region->update_height_range_from_image(height_map);
-							update_master_heights(region->get_height_range());
-						}
-						_generated_control_maps.update(region->get_composited_map(TYPE_CONTROL), region_id);
-						_generated_color_maps.update(region->get_composited_map(TYPE_COLOR), region_id);
+						_generated_height_maps.update(region->get_map(Terrain3DRegion::TYPE_HEIGHT), region_id);
+						_generated_control_maps.update(region->get_map(Terrain3DRegion::TYPE_CONTROL), region_id);
+						_generated_color_maps.update(region->get_map(Terrain3DRegion::TYPE_COLOR), region_id);
+						LOG(DEBUG, "Emitting height_maps_changed");
 						emit_signal("height_maps_changed");
+						LOG(DEBUG, "Emitting control_maps_changed");
 						emit_signal("control_maps_changed");
+						LOG(DEBUG, "Emitting color_maps_changed");
 						emit_signal("color_maps_changed");
 						break;
 				}
-				region->set_edited(false);
 			}
 		}
 	}
 	if (any_changed) {
+		LOG(DEBUG, "Emitting maps_changed");
 		emit_signal("maps_changed");
-		_terrain->request_mesh_snap();
+		_terrain->snap();
 	}
 }
 
@@ -1425,12 +656,12 @@ Color Terrain3DData::get_pixel(const MapType p_map_type, const Vector3 &p_global
 	Vector3 descaled_pos = p_global_position / _vertex_spacing;
 	Vector2i img_pos = Vector2i(descaled_pos.x - global_offset.x, descaled_pos.z - global_offset.y);
 	img_pos = img_pos.clamp(V2I_ZERO, V2I(_region_size - 1));
-	Ref<Image> composite = region->get_composited_map(p_map_type);
-	if (composite.is_valid()) {
-		return composite->get_pixelv(img_pos);
-	}
 	Image *map = region->get_map_ptr(p_map_type);
-	return map ? map->get_pixelv(img_pos) : COLOR_NAN;
+	if (map) {
+		return map->get_pixelv(img_pos);
+	} else {
+		return COLOR_NAN;
+	}
 }
 
 real_t Terrain3DData::get_height(const Vector3 &p_global_position) const {
@@ -1604,6 +835,7 @@ void Terrain3DData::add_edited_area(const AABB &p_area) {
 	} else {
 		_edited_area = p_area;
 	}
+	LOG(DEBUG, "Emitting maps_edited");
 	emit_signal("maps_edited", p_area);
 }
 
@@ -1881,20 +1113,40 @@ Ref<Image> Terrain3DData::layered_to_image(const MapType p_map_type) const {
 		Vector2i img_location = (region_loc - top_left) * _region_size;
 		LOG(DEBUG, "Region to blit: ", region_loc, " Export image coords: ", img_location);
 		const Terrain3DRegion *region = get_region_ptr(region_loc);
-		if (!region) {
-			continue;
+		if (region) {
+			img->blit_rect(region->get_map(map_type), Rect2i(V2I_ZERO, _region_sizev), img_location);
 		}
-		Ref<Image> source = region->get_composited_map(map_type);
-		if (source.is_null()) {
-			source = region->get_map(map_type);
-		}
-		if (source.is_null()) {
-			continue;
-		}
-		Rect2i src_rect = Rect2i(V2I_ZERO, source->get_size());
-		img->blit_rect(source, src_rect, img_location);
 	}
 	return img;
+}
+
+void Terrain3DData::set_region_override(const Vector2i &p_region_loc, const Ref<Image> &p_height, const Ref<Image> &p_control, const Ref<Image> &p_color) {
+	Terrain3DRegion *region = get_region_ptr(p_region_loc);
+	if (!region) {
+		LOG(ERROR, "set_region_override: Region not found at location ", p_region_loc);
+		return;
+	}
+
+	// Set override maps (null images will clear the override)
+	if (p_height.is_valid() || region->get_height_map_override().is_valid()) {
+		region->set_height_map_override(p_height);
+	}
+	if (p_control.is_valid() || region->get_control_map_override().is_valid()) {
+		region->set_control_map_override(p_control);
+	}
+	if (p_color.is_valid() || region->get_color_map_override().is_valid()) {
+		region->set_color_map_override(p_color);
+	}
+
+	// Mark the region as modified so it gets saved
+	region->set_modified(true);
+	region->set_edited(true);
+
+	// Trigger texture array update to reflect changes immediately
+	update_maps(TYPE_MAX, false, false);
+	region->set_edited(false);
+
+	LOG(INFO, "set_region_override: Updated override maps for region ", p_region_loc);
 }
 
 void Terrain3DData::dump(const bool verbose) const {
@@ -1975,20 +1227,6 @@ void Terrain3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_control_maps"), &Terrain3DData::get_control_maps);
 	ClassDB::bind_method(D_METHOD("get_color_maps"), &Terrain3DData::get_color_maps);
 	ClassDB::bind_method(D_METHOD("get_maps", "map_type"), &Terrain3DData::get_maps);
-	ClassDB::bind_method(D_METHOD("get_layers", "region_location", "map_type"), &Terrain3DData::get_layers);
-	ClassDB::bind_method(D_METHOD("get_layer_groups", "map_type"), &Terrain3DData::get_layer_groups);
-	ClassDB::bind_method(D_METHOD("ensure_layer_group_id", "layer"), &Terrain3DData::ensure_layer_group_id);
-	ClassDB::bind_method(D_METHOD("add_layer", "region_location", "map_type", "layer", "index", "update"), &Terrain3DData::add_layer, DEFVAL(-1), DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("add_stamp_layer", "region_location", "map_type", "payload", "coverage", "alpha", "intensity", "feather_radius", "blend_mode", "index", "update"), &Terrain3DData::add_stamp_layer, DEFVAL(Ref<Image>()), DEFVAL(1.0f), DEFVAL(0.0f), DEFVAL(Terrain3DLayer::BLEND_ADD), DEFVAL(-1), DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("add_stamp_layer_global", "global_coverage", "map_type", "payload", "alpha", "intensity", "feather_radius", "blend_mode", "auto_create_regions", "update"), &Terrain3DData::add_stamp_layer_global, DEFVAL(Ref<Image>()), DEFVAL(1.0f), DEFVAL(0.0f), DEFVAL(Terrain3DLayer::BLEND_ADD), DEFVAL(true), DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("split_layer_payload_global_data", "global_coverage", "payload", "alpha"), &Terrain3DData::split_layer_payload_global_data, DEFVAL(Ref<Image>()));
-	ClassDB::bind_method(D_METHOD("get_layer_owner_info", "layer", "map_type"), &Terrain3DData::get_layer_owner_info);
-	ClassDB::bind_method(D_METHOD("set_layer_coverage", "region_location", "map_type", "index", "coverage", "update"), &Terrain3DData::set_layer_coverage, DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("move_stamp_layer", "layer", "world_position", "update"), &Terrain3DData::move_stamp_layer, DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("set_layer_enabled", "region_location", "map_type", "index", "enabled", "update"), &Terrain3DData::set_layer_enabled, DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("remove_layer", "region_location", "map_type", "index", "update"), &Terrain3DData::remove_layer, DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("set_map_layer", "region_location", "map_type", "image", "external_id", "update"), &Terrain3DData::set_map_layer, DEFVAL(0), DEFVAL(true));
-	ClassDB::bind_method(D_METHOD("release_map_layer", "external_id", "remove_layer", "update"), &Terrain3DData::release_map_layer, DEFVAL(true), DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("update_maps", "map_type", "all_regions", "generate_mipmaps"), &Terrain3DData::update_maps, DEFVAL(TYPE_MAX), DEFVAL(true), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_height_maps_rid"), &Terrain3DData::get_height_maps_rid);
 	ClassDB::bind_method(D_METHOD("get_control_maps_rid"), &Terrain3DData::get_control_maps_rid);
@@ -2033,6 +1271,7 @@ void Terrain3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("import_images", "images", "global_position", "offset", "scale"), &Terrain3DData::import_images, DEFVAL(V3_ZERO), DEFVAL(0.f), DEFVAL(1.f));
 	ClassDB::bind_method(D_METHOD("export_image", "file_name", "map_type"), &Terrain3DData::export_image);
 	ClassDB::bind_method(D_METHOD("layered_to_image", "map_type"), &Terrain3DData::layered_to_image);
+	ClassDB::bind_method(D_METHOD("set_region_override", "region_location", "height_map", "control_map", "color_map"), &Terrain3DData::set_region_override);
 	ClassDB::bind_method(D_METHOD("dump", "verbose"), &Terrain3DData::dump, DEFVAL(false));
 
 	int ro_flags = PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_READ_ONLY;
